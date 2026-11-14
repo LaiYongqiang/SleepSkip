@@ -28,7 +28,8 @@ and to time the one thing the code cannot answer: persistence.
 | 6 | `AppleClamshellCausesSleep` is **not** a usable signal for "is lid sleep currently suppressed" (it tracks bit 4, not bit 3) | Measured (negative) + disassembly |
 | 7 | `selector 12 + stock caffeinate` keeps a lid-closed Mac awake for 25 min on battery, with no Never Sleep process and no admin rights | Measured (sanity check) |
 | 8 | The whole lid-sleep decision is **one bit** (`1 << 3` at `IOPMrootDomain+0x1ec`), read by `shouldSleepOnClamshellClosed()`; the lid handler branches around `privateSleepSystem` when it is clear | **Proven from kernel disassembly** (§3A) |
-| 9 | The link from selector 12 to that bit is **inferred, not read**: the setter writes bit 1 of `+0x224`, and no direct copy to `+0x1ec` exists in the text section | **Open** (§3A.6) |
+| 9 | **Reconnecting power with the lid shut sleeps the Mac 6–9 s later**, regardless of re-arm frequency. Unplugging is unaffected. Never Sleep behaves identically. | **Measured** (§10) |
+| 10 | The link from selector 12 to that bit is **inferred, not read**: the setter writes bit 1 of `+0x224`, and no direct copy to `+0x1ec` exists in the text section | **Open** (§3A.6) |
 
 The short version for the product: **selector 12 + a stock `caffeinate` assertion reproduces
 Never Sleep's behaviour with no privilege escalation**, and §3A shows why it must. The one
@@ -276,7 +277,7 @@ an earlier draft of this document claimed:
 | :--- | :--- | :--- |
 | Does a clear bit 3 skip lid sleep? | Read from control flow | **No** |
 | Does selector 12 clear bit 3? | Inferred from behaviour (§3A.3) | One confirmation |
-| Does the state survive a long session (sleep/wake, cable change)? | Unknown | **Yes — one soak** |
+| Does the state survive a long session (sleep/wake, cable change)? | **No — a power change clears it** (§10) | Measured |
 
 So: one soak, not a series. It should span a sleep/wake cycle and a cable change, and it
 should verify the *effect* (no lid sleep) rather than only the log. If it passes, the
@@ -527,7 +528,7 @@ The realistic path is a **three-mode design**, not a replacement:
 
 | Mode | Mechanism | Prompt | Status |
 | :--- | :--- | :--- | :--- |
-| Default | selector 12 + `caffeinate -i -w <pid>` | none | Needs one soak |
+| Default | selector 12 + `caffeinate -i -w <pid>` | none | **Shipped in 1.5.0**; fails on cable reconnect (§10) |
 | Compatibility | `pmset -a disablesleep 1` + watchdog | admin | Verified, ship as-is |
 | Idle-only | `caffeinate -i` | none | Already shipped |
 
@@ -596,3 +597,67 @@ Invalidated post-hoc by a harness bug, not by macOS behaviour. Adding it here be
 distinction matters: a failed experiment that *looks* like evidence against a mechanism is
 the most dangerous kind of result to leave undocumented. The re-run with a corrected harness
 (COMBO2) produced the expected positive result, and is the basis for finding #7.
+
+---
+
+## 10. The one gap that matters: reconnecting power
+
+Every measurement in §4 kept the power source steady. This section is what happens when it
+changes, and it invalidates the earlier reading that selector 12 was a viable replacement for
+`pmset -a disablesleep 1`.
+
+### 10.1 Result
+
+| Sequence | Outcome |
+| :--- | :--- |
+| Lid closed, AC throughout | No sleep (69 min measured) |
+| Lid closed, battery throughout | No sleep (25 min measured) |
+| Lid closed, then **unplug** | No sleep (65 s measured) |
+| Lid closed, then **reconnect power** | **Sleeps after 6–9 s**, every time |
+
+Four independent runs, three different re-arm strategies:
+
+| Re-arm strategy | Time from reconnect to sleep |
+| :--- | ---: |
+| 60 s polling | 9 s |
+| 1 Hz timer + power-source event | 7 s |
+| 1 Hz timer + event (Never Sleep, same conditions) | 6 s |
+| Event-driven only | 9 s |
+
+**Re-arm frequency makes no difference.** Never Sleep — which polls at 1 Hz, the strategy this
+document previously assumed was the answer — sleeps under exactly the same conditions.
+
+### 10.2 Why
+
+powerd commits to the decision before any re-arm can land:
+
+```
+09:38:42  Using AC              <- cable reconnected
+09:38:44  darkwakelinger created <- powerd has decided to sleep
+09:38:49  Entering Sleep state
+```
+
+`darkwakelinger` is the beacon that the sleep transition has started. Once it exists, changing
+selector 12 has no effect on it: the flag is consulted when the lid-close *event* is handled,
+not when an already-committed transition is executed. That is consistent with §3A.4 — the gate
+is read at the top of the lid handler, and a power change re-enters that handler on a path that
+has already passed the gate.
+
+Unplugging does not re-enter that path, which is why it is harmless.
+
+### 10.3 Consequence for the product
+
+`pmset -a disablesleep 1` is unaffected by the same test, because powerd reads the system-wide
+flag on the power-change path too. It remains the only mechanism that survives a cable swap.
+
+SleepSkip 1.5.0 therefore ships **both**, defaulting to the unprivileged one and stating the
+limitation in Preferences:
+
+| Mode | Mechanism | Prompt | Cable reconnect |
+| :--- | :--- | :--- | :--- |
+| Standard (default) | selector 12 + power-source event | none | **sleeps after 6–9 s** |
+| Compatibility | `pmset -a disablesleep 1` | admin | holds |
+
+A 1 Hz re-arm was implemented, measured, and removed: it cost CPU, broke the "no timers while
+the panel is closed" promise, and changed nothing. The power-source event is kept because it is
+the only re-arm that can act before a decision is committed, and it costs nothing at rest.
