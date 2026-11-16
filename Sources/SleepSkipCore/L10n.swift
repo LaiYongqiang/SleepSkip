@@ -332,6 +332,44 @@ public struct L10n {
     public var claudeHookConnectedBadge: String { isZh ? "已连接" : "Connected" }
     public var claudeHookDisconnectedBadge: String { isZh ? "未连接" : "Not Connected" }
     public var claudeHookHoldingBadge: String { isZh ? "保持中" : "Holding" }
+    public func claudeHookStatusBadge(_ status: HookProtectionStatus) -> String? {
+        switch status {
+        case .none:
+            return nil
+        case .holding:
+            return claudeHookHoldingBadge
+        case .paused(let limitReached):
+            if limitReached {
+                return isZh ? "达上限已暂停" : "Paused (2h Limit)"
+            }
+            return isZh ? "已暂停" : "Paused"
+        case .standbyBehindManual:
+            return isZh ? "待命 · 手动优先" : "Queued · Manual Active"
+        }
+    }
+    public func claudeHookStatusDetail(_ status: HookProtectionStatus) -> String? {
+        switch status {
+        case .none:
+            return nil
+        case .holding:
+            return isZh
+                ? "当前有 Hook 会话正在通过自动跟随保持唤醒。"
+                : "An active hook session is currently holding wake protection."
+        case .paused(let limitReached):
+            if limitReached {
+                return isZh
+                    ? "检测到进行中的 Hook 会话，因达 2 小时上限已释放唤醒保护。"
+                    : "Hook session is still active, but wake protection was released at the 2h limit."
+            }
+            return isZh
+                ? "检测到进行中的 Hook 会话，但本次跟随已暂停（当前未保持唤醒）。"
+                : "Hook session is active, but auto-following is paused (not holding wake protection)."
+        case .standbyBehindManual:
+            return isZh
+                ? "检测到进行中的 Hook 会话；当前由手动会话保持唤醒，手动结束后若仍活跃将接管。"
+                : "Hook session is active; manual protection currently owns the wake assertion."
+        }
+    }
     public var claudeHookConnectButton: String { isZh ? "连接 Hook" : "Connect" }
     public var claudeHookDisconnectButton: String { isZh ? "断开 Hook" : "Disconnect" }
     public var claudeHookHint: String {
@@ -404,8 +442,25 @@ public struct L10n {
             ? "转为手动计时（\(durationText)，不随 Agent 释放）"
             : "Take Over as Manual (\(durationText), ignores agent stop)"
     }
-    public var returnToAutoFollowButton: String {
-        isZh ? "切回自动跟随" : "Return to Auto-Follow"
+    public func returnToAutoFollowButton(dropsClosedLid: Bool) -> String {
+        if dropsClosedLid {
+            return isZh ? "切回自动跟随（将关闭合盖保护）" : "Return to Auto-Follow (disables lid-closed)"
+        }
+        return isZh ? "切回自动跟随" : "Return to Auto-Follow"
+    }
+    public var confirmAutoFollowSwitchTitle: String {
+        isZh ? "切回自动跟随会关闭合盖保护" : "Switching disables lid-closed protection"
+    }
+    public var confirmAutoFollowSwitchDetail: String {
+        isZh
+            ? "自动跟随不支持合盖运行。确认切回将立即关闭合盖保护并转为 2 小时上限的后台自动跟随；如需继续合盖，请保留当前手动会话。"
+            : "Auto-follow does not support lid-closed mode. Switching disables lid protection immediately and continues in background auto-follow (2h cap). Keep this manual session to stay lid-closed."
+    }
+    public var confirmAutoFollowSwitchButton: String {
+        isZh ? "关闭合盖并切回" : "Disable Lid & Switch"
+    }
+    public var keepClosedLidSessionButton: String {
+        isZh ? "保留合盖会话" : "Keep Lid-Closed"
     }
 
     public func autoFollowCeilingLabel(_ time: String, sourceKind: AutoFollowSourceKind) -> String {

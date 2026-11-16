@@ -17,16 +17,6 @@ struct SleepSkipPopoverView: View {
 
     private var t: L10n { manager.l10n }
 
-    private var settingsScrollHeight: CGFloat {
-        // Reserve space for pinned header, optional active/error/stale banners, and footer so
-        // the entire popover always fits within the screen's visible height.
-        var fixedAllowance: CGFloat = 174
-        if manager.isAuthorizing || manager.isRunning { fixedAllowance += 64 }
-        if manager.errorMessage != nil { fixedAllowance += 56 }
-        else if manager.staleSleepDisabled && !manager.isRunning { fixedAllowance += 48 }
-        return max(96, min(430, layoutModel.maxPopoverHeight - fixedAllowance))
-    }
-
     var body: some View {
         VStack(spacing: 12) {
             headerBar
@@ -35,49 +25,51 @@ struct SleepSkipPopoverView: View {
                 settingsPinnedHeaderBanners
                 settingsContent
             } else {
+                mainPinnedTopBanners
                 mainViewBody
             }
         }
         .padding(16)
         .frame(width: 372)
+        .frame(maxHeight: layoutModel.maxPopoverHeight)
         // NSPopover's own background is translucent, so without an opaque fill the desktop and
         // the menu bar behind it show through and the whole panel reads as washed-out grey.
         .background(Color(NSColor.windowBackgroundColor))
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
     private var mainViewBody: some View {
-        let needsScroll = layoutModel.maxPopoverHeight < 470
-        if needsScroll {
+        ViewThatFits(in: .vertical) {
+            mainViewStack
             ScrollView(.vertical, showsIndicators: true) {
                 mainViewStack
+                    .padding(.trailing, 4)
             }
-            .frame(height: max(200, layoutModel.maxPopoverHeight - 76))
-        } else {
-            mainViewStack
+        }
+    }
+
+    @ViewBuilder
+    private var mainPinnedTopBanners: some View {
+        if let error = manager.errorMessage {
+            errorBanner(error)
+        } else if manager.staleSleepDisabled && !manager.isRunning {
+            staleSleepBanner
+        }
+
+        if manager.isAuthorizing {
+            authorizingBanner
         }
     }
 
     @ViewBuilder
     private var mainViewStack: some View {
         VStack(spacing: 12) {
-            if let error = manager.errorMessage {
-                errorBanner(error)
-            } else if manager.staleSleepDisabled && !manager.isRunning {
-                staleSleepBanner
-            }
-
             if let cli = manager.externalCLI {
                 cliBanner(cli)
             }
 
             if manager.showAutoFollowNotice {
                 autoFollowNotice
-            }
-
-            if manager.isAuthorizing {
-                authorizingBanner
             }
 
             if manager.isRunning {
@@ -781,11 +773,48 @@ struct SleepSkipPopoverView: View {
                     }
 
                     if manager.canSwitchToAutoFollow {
-                        Button(t.returnToAutoFollowButton) {
-                            manager.switchManualToAutoFollow()
+                        if manager.pendingAutoFollowSwitchConfirmation {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(t.confirmAutoFollowSwitchTitle)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text(t.confirmAutoFollowSwitchDetail)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                HStack(spacing: 8) {
+                                    Button(t.confirmAutoFollowSwitchButton) {
+                                        manager.switchManualToAutoFollow()
+                                    }
+                                    .buttonStyle(BorderedButtonStyle())
+                                    .controlSize(.small)
+                                    .tint(.orange)
+
+                                    Button(t.keepClosedLidSessionButton) {
+                                        manager.cancelSwitchToAutoFollow()
+                                    }
+                                    .buttonStyle(BorderedButtonStyle())
+                                    .controlSize(.small)
+                                }
+                            }
+                            .padding(9)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.orange.opacity(0.1))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(Color.orange.opacity(0.28), lineWidth: 1)
+                            )
+                        } else {
+                            Button(t.returnToAutoFollowButton(dropsClosedLid: manager.activeClosedLid)) {
+                                manager.requestSwitchManualToAutoFollow()
+                            }
+                            .buttonStyle(LinkButtonStyle())
+                            .font(.system(size: 11))
                         }
-                        .buttonStyle(LinkButtonStyle())
-                        .font(.system(size: 11))
                     }
                 }
             }
@@ -938,11 +967,53 @@ struct SleepSkipPopoverView: View {
             Text(t.settingsTitle)
                 .font(.system(size: 13, weight: .semibold))
 
-            ScrollView(.vertical, showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 10) {
-                    if let cli = manager.externalCLI {
-                        cliBanner(cli)
+            ViewThatFits(in: .vertical) {
+                settingsScrollBody
+                ScrollView(.vertical, showsIndicators: true) {
+                    settingsScrollBody
+                        .padding(.trailing, 4)
+                }
+            }
+
+            Text(t.safetyFooterHint)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider()
+
+            HStack {
+                Button("v\(AppInfo.version) · GitHub") {
+                    if let url = URL(string: AppInfo.repositoryURL) {
+                        NSWorkspace.shared.open(url)
                     }
+                }
+                .buttonStyle(LinkButtonStyle())
+                .font(.system(size: 11))
+
+                Spacer()
+
+                Button(t.quitButton) {
+                    manager.stopSession(reason: .silent)
+                    NSApp.terminate(nil)
+                }
+                .buttonStyle(BorderedButtonStyle())
+                .controlSize(.small)
+
+                Button(t.backButton) {
+                    manager.showSettings = false
+                }
+                .buttonStyle(BorderedProminentButtonStyle())
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private var settingsScrollBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let cli = manager.externalCLI {
+                cliBanner(cli)
+            }
 
                     // 1. Folder watching card
                     VStack(alignment: .leading, spacing: 8) {
@@ -1099,42 +1170,6 @@ struct SleepSkipPopoverView: View {
                     }
                     .padding(10)
                     .background(settingsCardBackground)
-                }
-                .padding(.trailing, 4)
-            }
-            .frame(height: settingsScrollHeight)
-
-            Text(t.safetyFooterHint)
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-
-            HStack {
-                Button("v\(AppInfo.version) · GitHub") {
-                    if let url = URL(string: AppInfo.repositoryURL) {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-                .buttonStyle(LinkButtonStyle())
-                .font(.system(size: 11))
-
-                Spacer()
-
-                Button(t.quitButton) {
-                    manager.stopSession(reason: .silent)
-                    NSApp.terminate(nil)
-                }
-                .buttonStyle(BorderedButtonStyle())
-                .controlSize(.small)
-
-                Button(t.backButton) {
-                    manager.showSettings = false
-                }
-                .buttonStyle(BorderedProminentButtonStyle())
-                .controlSize(.small)
-            }
         }
     }
 
@@ -1405,14 +1440,24 @@ struct SleepSkipPopoverView: View {
     }
 
     private var claudeHookSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let hookStatus = manager.hookProtectionStatus
+        let statusColor: Color = {
+            switch hookStatus {
+            case .none: return .secondary
+            case .holding: return .blue
+            case .paused: return .orange
+            case .standbyBehindManual: return .secondary
+            }
+        }()
+
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Text(t.claudeHookSectionLabel)
                     .font(.system(size: 12, weight: .semibold))
                 statusBadge(t.claudeHookIndependentBadge, color: .secondary)
                 Spacer()
-                if manager.hasActiveHookSessions {
-                    statusBadge(t.claudeHookHoldingBadge, color: .blue)
+                if let badge = t.claudeHookStatusBadge(hookStatus) {
+                    statusBadge(badge, color: statusColor)
                 }
             }
 
@@ -1432,6 +1477,23 @@ struct SleepSkipPopoverView: View {
                 }
                 .buttonStyle(BorderedButtonStyle())
                 .controlSize(.small)
+            }
+
+            if let detail = t.claudeHookStatusDetail(hookStatus) {
+                HStack(spacing: 6) {
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundColor(statusColor == .orange ? .orange : .primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if case .paused = hookStatus {
+                        Spacer(minLength: 4)
+                        Button(t.resumeAutoFollowButton) {
+                            manager.resumeAutoFollow()
+                        }
+                        .buttonStyle(BorderedButtonStyle())
+                        .controlSize(.small)
+                    }
+                }
             }
 
             Text(t.claudeHookHint)

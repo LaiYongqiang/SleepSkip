@@ -109,6 +109,10 @@ public final class SessionManager: ObservableObject {
     @Published public private(set) var autoFollowSuppressed: Bool = false
     /// Active source classes contributing to the current or paused auto-follow state.
     @Published public private(set) var activeAutoFollowSourceKind: AutoFollowSourceKind = .none
+    /// Distinguishes an active hook lease that is holding wake protection from one that is paused or behind a manual timer.
+    @Published public private(set) var hookProtectionStatus: HookProtectionStatus = .none
+    /// True when the user asked to return from a manual closed-lid session to auto-follow and needs to confirm dropping lid protection.
+    @Published public var pendingAutoFollowSwitchConfirmation: Bool = false
     /// Captures the exact parameters locked in for an in-flight admin authorization.
     @Published public private(set) var pendingAuthorizationLaunch: PendingAuthorizationLaunch? = nil
     private var lastAgentActivityState: AgentActivityState = .inactive
@@ -199,6 +203,24 @@ public final class SessionManager: ObservableObject {
         if activeAutoFollowSourceKind != next {
             activeAutoFollowSourceKind = next
         }
+        let nextHookStatus = computeHookProtectionStatus()
+        if hookProtectionStatus != nextHookStatus {
+            hookProtectionStatus = nextHookStatus
+        }
+        if !canSwitchToAutoFollow, pendingAutoFollowSwitchConfirmation {
+            pendingAutoFollowSwitchConfirmation = false
+        }
+    }
+
+    private func computeHookProtectionStatus() -> HookProtectionStatus {
+        guard hasActiveHookSessions else { return .none }
+        if isRunning && isFollowingAgents {
+            return .holding
+        }
+        if isRunning || isAuthorizing {
+            return .standbyBehindManual
+        }
+        return .paused(limitReached: autoFollowLimitReached)
     }
 
     /// Surfaces the one-time notice. Called at launch when the setting is on and the user has
@@ -931,6 +953,7 @@ public final class SessionManager: ObservableObject {
         // that never returns, used to leave the button spinning forever with no way out.
         let authorizationToken = UUID()
         activeAuthorizationToken = authorizationToken
+        syncAutoFollowSourceKind()
         notifyStateTransition()
         authorizationScheduler(120) { [weak self] in
             guard let self, self.isAuthorizing, self.activeAuthorizationToken == authorizationToken else { return }
@@ -940,6 +963,7 @@ public final class SessionManager: ObservableObject {
             self.backpackGuard.disable()
             self.stopIdleSafetyWatches()
             self.errorMessage = self.l10n.authorizationTimedOut
+            self.syncAutoFollowSourceKind()
             self.notifyStateTransition()
         }
         backpackGuard.enable { [weak self] result in
@@ -962,6 +986,7 @@ public final class SessionManager: ObservableObject {
             case .failure(let error):
                 self.stopIdleSafetyWatches()
                 self.errorMessage = error.localizedDescription
+                self.syncAutoFollowSourceKind()
                 self.notifyStateTransition()
             }
         }
@@ -972,10 +997,12 @@ public final class SessionManager: ObservableObject {
         activeAuthorizationToken = nil
         isAuthorizing = false
         pendingAuthorizationLaunch = nil
+        pendingAutoFollowSwitchConfirmation = false
         if !activeClosedLid {
             backpackGuard.disable()
         }
         stopIdleSafetyWatches()
+        syncAutoFollowSourceKind()
         notifyStateTransition()
     }
 
@@ -1025,8 +1052,10 @@ public final class SessionManager: ObservableObject {
         activeSessionAgents = []
         endDate = timeoutSec.map { now.addingTimeInterval(TimeInterval($0)) }
         isRunning = true
+        pendingAutoFollowSwitchConfirmation = false
         showCustomInput = false
         showSettings = false
+        syncAutoFollowSourceKind()
         refreshDisplayTick()
         startPowerWatch()
         startThermalWatch()
@@ -1078,9 +1107,11 @@ public final class SessionManager: ObservableObject {
                 backpackGuard.disable()
                 unprivilegedLidGuard?.disable()
                 activeClosedLid = false
+                pendingAutoFollowSwitchConfirmation = false
             }
             config.mode = newMode
             persistConfig()
+            syncAutoFollowSourceKind()
             notifyStateTransition()
         } catch {
             errorMessage = error.localizedDescription
@@ -1107,6 +1138,7 @@ public final class SessionManager: ObservableObject {
         isFollowingAgents = false
         followingAgents = []
         activeAutoFollowSourceKind = .none
+        pendingAutoFollowSwitchConfirmation = false
         autoFollowGraceEndDate = nil
         autoFollowGraceRemainingSeconds = 0
         isIndefinite = (timeoutSec == nil)
@@ -1116,14 +1148,32 @@ public final class SessionManager: ObservableObject {
         activeSessionTrigger = .manual
         activeSessionAgents = []
         endDate = timeoutSec.map { now.addingTimeInterval(TimeInterval($0)) }
+        syncAutoFollowSourceKind()
         refreshDisplayTick()
         notifyStateTransition()
+    }
+
+    /// Requests switching a running manual session back to auto-follow. When closed-lid protection
+    /// is active, stages an explicit confirmation rather than silently dropping lid protection.
+    public func requestSwitchManualToAutoFollow() {
+        guard isRunning, !isFollowingAgents, !isAuthorizing, canSwitchToAutoFollow else { return }
+        if activeClosedLid {
+            pendingAutoFollowSwitchConfirmation = true
+        } else {
+            pendingAutoFollowSwitchConfirmation = false
+            switchManualToAutoFollow()
+        }
+    }
+
+    public func cancelSwitchToAutoFollow() {
+        pendingAutoFollowSwitchConfirmation = false
     }
 
     /// Returns a running manual session back to auto-follow when at least one automatic source is active.
     public func switchManualToAutoFollow() {
         guard isRunning, !isFollowingAgents, !isAuthorizing, canSwitchToAutoFollow else { return }
         errorMessage = nil
+        pendingAutoFollowSwitchConfirmation = false
         let ceilingSeconds = max(1, Int(agentTracker.currentPolicy.maxAutoSessionDuration.rounded()))
 
         do {
@@ -1205,6 +1255,7 @@ public final class SessionManager: ObservableObject {
         activeAuthorizationToken = nil
         isAuthorizing = false
         pendingAuthorizationLaunch = nil
+        pendingAutoFollowSwitchConfirmation = false
 
         // A user-initiated stop while agents are still writing should stay stopped; only a fresh
         // quiet period re-arms auto-follow.

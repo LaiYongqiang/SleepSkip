@@ -84,6 +84,13 @@ public enum AutoFollowSourceKind: Equatable, Sendable {
     case both
 }
 
+public enum HookProtectionStatus: Equatable, Sendable {
+    case none
+    case holding
+    case paused(limitReached: Bool)
+    case standbyBehindManual
+}
+
 public struct PendingAuthorizationLaunch: Equatable, Sendable {
     public let mode: GuardMode
     public let durationMinutes: Double

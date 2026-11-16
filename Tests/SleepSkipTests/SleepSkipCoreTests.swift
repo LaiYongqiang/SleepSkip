@@ -1529,4 +1529,157 @@ struct SleepSkipCoreTests {
         #expect(thermal.triggerHandler == nil)
     }
 
+    @Test func closedLidManualToAutoFollowRequiresConfirmationAndPreservesProtectionOnCancelOrFailure() throws {
+        final class MockLidGuard: ClosedLidGuarding {
+            var isEngaged = false
+            var disableCalls = 0
+            func enable(completion: @escaping (Result<Void, Error>) -> Void) {
+                isEngaged = true
+                completion(.success(()))
+            }
+            func disable() {
+                disableCalls += 1
+                isEngaged = false
+            }
+        }
+
+        // 1. Ordinary manual session switches immediately without confirmation.
+        do {
+            let caf = MockCaffeinateRunner()
+            let (manager, defaults, suite) = try makeManager(caf: caf)
+            defer { defaults.removePersistentDomain(forName: suite) }
+            manager.setAutoFollowEnabled(true)
+            manager.agentTracker.recordActivity(sourceID: "codex")
+            manager.handleAgentActivity(manager.agentTracker.evaluate())
+            manager.promoteAutoFollowToManual()
+            #expect(!manager.activeClosedLid)
+            manager.requestSwitchManualToAutoFollow()
+            #expect(!manager.pendingAutoFollowSwitchConfirmation)
+            #expect(manager.isFollowingAgents)
+        }
+
+        // 2. Standard (unprivileged) and Compatibility (privileged) closed-lid sessions require confirmation
+        // and preserve lid protection on cancel or caffeinate failure.
+        for strategy in [ClosedLidStrategy.unprivileged, ClosedLidStrategy.privileged] {
+            let caf = MockCaffeinateRunner()
+            let bag = MockBackpackGuard()
+            let lid = MockLidGuard()
+            let suite = "ss.lidswitch.\(strategy.rawValue).\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let manager = SessionManager(
+                store: PreferencesStore(defaults: defaults),
+                caffeinateRunner: caf,
+                backpackGuard: bag,
+                unprivilegedLidGuard: lid,
+                powerMonitor: MockPowerMonitor(),
+                screenLocker: MockScreenLocker(),
+                notifier: MockNotifier(),
+                loginItem: MockLoginItem(),
+                checkStaleSleepOnInit: false
+            )
+            manager.setAutoFollowEnabled(true)
+            manager.agentTracker.recordActivity(sourceID: "codex")
+            manager.setClosedLidStrategy(strategy)
+            manager.setAllowClosedLid(true)
+            manager.startConfiguredSession()
+            #expect(manager.isRunning && manager.activeClosedLid)
+            #expect(manager.canSwitchToAutoFollow)
+            let isProtected: () -> Bool = { strategy == .unprivileged ? lid.isEngaged : bag.enabled }
+            #expect(isProtected())
+
+            // Request stages confirmation without dropping protection.
+            manager.requestSwitchManualToAutoFollow()
+            #expect(manager.pendingAutoFollowSwitchConfirmation)
+            #expect(manager.activeClosedLid)
+            #expect(!manager.isFollowingAgents)
+            #expect(isProtected())
+
+            // Cancel preserves active closed-lid guard.
+            manager.cancelSwitchToAutoFollow()
+            #expect(!manager.pendingAutoFollowSwitchConfirmation)
+            #expect(manager.activeClosedLid)
+            #expect(isProtected())
+
+            // Failure when starting auto-follow caffeinate preserves active closed-lid guard.
+            manager.requestSwitchManualToAutoFollow()
+            caf.shouldThrowOnStart = true
+            manager.switchManualToAutoFollow()
+            #expect(manager.errorMessage != nil)
+            #expect(manager.activeClosedLid)
+            #expect(!manager.isFollowingAgents)
+            #expect(isProtected())
+
+            // Confirmed switch succeeds and cleanly disables lid protection.
+            caf.shouldThrowOnStart = false
+            manager.requestSwitchManualToAutoFollow()
+            manager.switchManualToAutoFollow()
+            #expect(manager.isFollowingAgents)
+            #expect(!manager.activeClosedLid)
+            #expect(!manager.pendingAutoFollowSwitchConfirmation)
+            #expect(!isProtected())
+        }
+    }
+
+    @Test func hookProtectionStatusTracksOwnershipAcrossPauseLimitManualAndMultiSource() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(manager.hookProtectionStatus == .none)
+
+        // Hook-only active -> holding
+        manager.setAutoFollowEnabled(false)
+        manager.handleHookStart(sessionID: "h1", agent: "claude-code")
+        #expect(manager.hasActiveHookSessions)
+        #expect(manager.hookProtectionStatus == .holding)
+
+        // Manual stop -> lease stays for recovery, status accurately reports paused
+        manager.stopSession(reason: .manual)
+        #expect(manager.hasActiveHookSessions)
+        #expect(manager.autoFollowSuppressed)
+        #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+
+        // Resume -> holding again
+        manager.resumeAutoFollow()
+        #expect(manager.hookProtectionStatus == .holding)
+
+        // 2h limit -> paused with limitReached = true
+        manager.handleAutoFollowLimitReached()
+        #expect(manager.hasActiveHookSessions)
+        #expect(manager.hookProtectionStatus == .paused(limitReached: true))
+
+        // Resume -> holding; then manual start takes ownership -> standbyBehindManual
+        manager.resumeAutoFollow()
+        #expect(manager.hookProtectionStatus == .holding)
+        manager.startConfiguredSession()
+        #expect(manager.isRunning && !manager.isFollowingAgents)
+        #expect(manager.hookProtectionStatus == .standbyBehindManual)
+
+        // Stop manual -> resumes paused state while hook lease still exists; hookStop clears to .none
+        manager.stopSession(reason: .manual)
+        #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+        manager.handleHookStop(sessionID: "h1", agent: "claude-code")
+        #expect(manager.hookProtectionStatus == .none)
+
+        // Multi-source (directory + hook): hookStop drops hook status to .none while directory keeps auto-follow alive
+        manager.setAutoFollowEnabled(true)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        manager.handleHookStart(sessionID: "h2", agent: "claude-code")
+        #expect(manager.hookProtectionStatus == .holding)
+        manager.handleHookStop(sessionID: "h2", agent: "claude-code")
+        #expect(manager.hookProtectionStatus == .none)
+        #expect(manager.isFollowingAgents && manager.isRunning)
+
+        // Copy check: paused badge must never say Holding / 保持中
+        let zh = L10n(language: .zhHans)
+        let en = L10n(language: .en)
+        #expect(zh.claudeHookStatusBadge(.paused(limitReached: false)) == "已暂停")
+        #expect(en.claudeHookStatusBadge(.paused(limitReached: false)) == "Paused")
+        #expect(zh.returnToAutoFollowButton(dropsClosedLid: true).contains("合盖"))
+        #expect(en.returnToAutoFollowButton(dropsClosedLid: true).contains("lid"))
+    }
+
 }
