@@ -281,7 +281,7 @@ struct SleepSkipCoreTests {
         let initial = store.load()
         #expect(initial.mode == .background)
         #expect(initial.durationMinutes == 240)
-        #expect(initial.lockOnStart == true)
+        #expect(initial.lockOnStart == false)
         #expect(initial.allowClosedLid == false)
         #expect(initial.stopOnUnplug == false)
         #expect(initial.autoFollowAgents == true)
@@ -291,7 +291,7 @@ struct SleepSkipCoreTests {
         updated.mode = .keepDisplay
         updated.durationMinutes = 90
         updated.customMinutes = 90
-        updated.lockOnStart = false
+        updated.lockOnStart = true
         updated.allowClosedLid = true
         updated.stopOnUnplug = true
         updated.autoFollowAgents = false
@@ -299,6 +299,13 @@ struct SleepSkipCoreTests {
         store.save(updated)
 
         #expect(store.load() == updated)
+
+        // Existing installs without an explicit lockOnStart key preserve legacy true behavior.
+        let legacySuite = "io.github.laiyongqiang.SleepSkip.legacyLock.\(UUID().uuidString)"
+        let legacyDefaults = try #require(UserDefaults(suiteName: legacySuite))
+        defer { legacyDefaults.removePersistentDomain(forName: legacySuite) }
+        legacyDefaults.set("background", forKey: "sleepskip.mode")
+        #expect(PreferencesStore(defaults: legacyDefaults).load().lockOnStart == true)
     }
 
     @Test func sessionManagerLifecycleAndPreFlightGuards() throws {
@@ -502,30 +509,149 @@ struct SleepSkipCoreTests {
         #expect(caf.stopCount == 1)
     }
 
-    @Test func manualStopAndModePromotionDuringAutoFollow() throws {
+    @Test func modeSwitchDuringAutoFollowPreservesLifecycleAcrossSavedPresets() throws {
+        for savedDuration in [1.0, 240.0, 0.0] {
+            var now = Date(timeIntervalSince1970: 1_700_000_000)
+            let caf = MockCaffeinateRunner()
+            let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+            defer { defaults.removePersistentDomain(forName: suite) }
+
+            manager.selectMode(.background)
+            manager.selectDuration(savedDuration)
+            manager.setAutoFollowEnabled(true)
+            manager.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: now))
+            #expect(manager.isFollowingAgents)
+            let autoEnd = manager.endDate
+
+            now = now.addingTimeInterval(20)
+            manager.switchRunningMode(to: .keepDisplay)
+            #expect(manager.isRunning)
+            #expect(manager.isFollowingAgents, "display mode switch must keep auto-follow lifecycle")
+            #expect(manager.activeMode == .keepDisplay)
+            #expect(!manager.isIndefinite, "indefinite manual preset must not leak into auto-follow")
+            #expect(manager.endDate == autoEnd, "2h ceiling must be preserved")
+            #expect(manager.config.mode == .background, "saved manual mode must stay unchanged")
+            #expect(caf.lastTimeout == 7210)
+
+            manager.switchRunningMode(to: .background)
+            #expect(manager.isFollowingAgents)
+            #expect(manager.activeMode == .background)
+            #expect(manager.endDate == autoEnd)
+
+            manager.handleAgentActivity(.inactive)
+            #expect(!manager.isRunning, "auto-follow session must still release on quiet after mode toggle")
+            #expect(!manager.isFollowingAgents)
+        }
+    }
+
+    @Test func explicitManualPromotionAndReturnToAutoFollow() throws {
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
         let caf = MockCaffeinateRunner()
-        let (manager, defaults, suite) = try makeManager(caf: caf)
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
         defer { defaults.removePersistentDomain(forName: suite) }
 
         manager.setAutoFollowEnabled(true)
-        manager.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: Date()))
+        manager.selectDuration(1)
+        manager.agentTracker.recordActivity(sourceID: "claude-code")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
         #expect(manager.isFollowingAgents)
+        #expect(manager.remainingSeconds == 7200)
+
+        manager.promoteAutoFollowToManual()
+        #expect(manager.isRunning)
+        #expect(!manager.isFollowingAgents)
+        #expect(manager.remainingSeconds == 60)
+        #expect(manager.canSwitchToAutoFollow)
+
+        manager.switchManualToAutoFollow()
+        #expect(manager.isFollowingAgents)
+        #expect(manager.remainingSeconds == 7200)
+
+        manager.promoteAutoFollowToManual()
+        now = now.addingTimeInterval(400)
+        manager.handleAgentActivity(.inactive)
+        #expect(manager.isRunning, "explicit manual session must survive agents going quiet")
+        #expect(!manager.canSwitchToAutoFollow)
+    }
+
+    @Test func pauseResumeAndCancelAuthorizationStates() throws {
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let bag = MockBackpackGuard()
+        let (manager, defaults, suite) = try makeManager(caf: caf, bag: bag, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Manual stop while active surfaces paused state and resumeAutoFollow restores immediately.
+        manager.setAutoFollowEnabled(true)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(manager.isFollowingAgents)
+        #expect(manager.activeAutoFollowSourceKind == .directoryOnly)
 
         manager.stopSession(reason: .manual)
         #expect(!manager.isRunning)
-        #expect(manager.isAutoFollowEnabled, "manual stop must preserve auto-follow setting")
+        #expect(manager.autoFollowSuppressed)
+        #expect(!manager.autoFollowLimitReached)
 
-        manager.handleAgentActivity(.inactive)
-        manager.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: Date()))
+        manager.resumeAutoFollow()
         #expect(manager.isFollowingAgents)
+        #expect(!manager.autoFollowSuppressed)
 
-        manager.switchRunningMode(to: .keepDisplay)
-        #expect(manager.isRunning)
-        #expect(!manager.isFollowingAgents)
-        #expect(manager.activeMode == .keepDisplay)
+        // 2h limit sets paused+limit state, and resumeAutoFollow restarts with a fresh 2h cap.
+        manager.handleAutoFollowLimitReached()
+        #expect(!manager.isRunning)
+        #expect(manager.autoFollowSuppressed)
+        #expect(manager.autoFollowLimitReached)
 
+        now = now.addingTimeInterval(10)
+        manager.resumeAutoFollow()
+        #expect(manager.isFollowingAgents)
+        #expect(!manager.autoFollowSuppressed)
+        #expect(!manager.autoFollowLimitReached)
+        #expect(manager.remainingSeconds == 7200)
+
+        // Cancelling pending admin authorization via cancelAuthorization drops pending state and ignores late success.
+        manager.stopSession(reason: .manual)
         manager.handleAgentActivity(.inactive)
-        #expect(manager.isRunning, "promoted manual session must survive agents going quiet")
+        bag.deferEnableCompletion = true
+        manager.setClosedLidStrategy(.privileged)
+        manager.setAllowClosedLid(true)
+        manager.startConfiguredSession()
+        #expect(manager.isAuthorizing)
+        #expect(manager.pendingAuthorizationLaunch != nil)
+
+        manager.cancelAuthorization()
+        #expect(!manager.isAuthorizing)
+        #expect(manager.pendingAuthorizationLaunch == nil)
+        #expect(!manager.autoFollowSuppressed)
+        let startsBeforeLateAuth = caf.startCount
+        bag.finishPendingEnable()
+        #expect(!manager.isRunning)
+        #expect(caf.startCount == startsBeforeLateAuth)
+        #expect(!bag.enabled)
+    }
+
+    @Test func l10nHonestBoundaryCopyAndSourceDistinction() {
+        let zh = L10n(language: .zhHans)
+        let en = L10n(language: .en)
+
+        var cfg = SessionConfig(mode: .background, durationMinutes: 60, lockOnStart: false, allowClosedLid: false)
+        #expect(!zh.launchConfigSummary(cfg).contains("上次配置"))
+        #expect(!en.launchConfigSummary(cfg).contains("Last:"))
+        #expect(zh.startButtonTitle(for: cfg) == "开始保持唤醒 (⏎)")
+        cfg.lockOnStart = true
+        #expect(zh.startButtonTitle(for: cfg) == "开始并锁屏 (⏎)")
+        #expect(en.startButtonTitle(for: cfg) == "Start & Lock Screen (⏎)")
+        cfg.allowClosedLid = true
+        cfg.closedLidStrategy = .privileged
+        #expect(zh.startButtonTitle(for: cfg).contains("授权"))
+        #expect(en.startButtonTitle(for: cfg).contains("Authorize"))
+
+        #expect(zh.autoFollowCeilingLabel("12:00", sourceKind: .hookOnly) != zh.autoFollowCeilingLabel("12:00", sourceKind: .directoryOnly))
+        #expect(!zh.autoFollowPolicySummary(.hookOnly).contains("停笔 5 分钟"))
+        #expect(!en.autoFollowPolicySummary(.hookOnly).contains("5m idle"))
+        #expect(zh.closedLidInlineNote(strategy: .unprivileged).contains("6–9"))
+        #expect(en.closedLidInlineNote(strategy: .unprivileged).contains("6–9"))
     }
 
     @Test func autoFollowDoesNotOverrideAManualSession() throws {

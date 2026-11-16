@@ -99,8 +99,10 @@ public final class PreferencesStore {
         let lockOnStart: Bool
         if defaults.object(forKey: Keys.lockOnStart) != nil {
             lockOnStart = defaults.bool(forKey: Keys.lockOnStart)
-        } else {
+        } else if defaults.object(forKey: Keys.mode) != nil || defaults.object(forKey: Keys.durationMinutes) != nil {
             lockOnStart = true
+        } else {
+            lockOnStart = false
         }
 
         let allowClosedLid: Bool

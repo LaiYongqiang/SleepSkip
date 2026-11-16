@@ -282,7 +282,7 @@ struct VerifyRunner {
 
         let store = PreferencesStore(defaults: defaults)
         var cfg = store.load()
-        expect(cfg.mode == .background && cfg.durationMinutes == 240 && cfg.lockOnStart && !cfg.stopOnUnplug, "Defaults match spec")
+        expect(cfg.mode == .background && cfg.durationMinutes == 240 && !cfg.lockOnStart && !cfg.stopOnUnplug, "Defaults match spec")
         expect(cfg.autoFollowAgents, "Auto-follow is on by default")
         cfg.stopOnUnplug = true
         cfg.autoFollowAgents = false
@@ -533,7 +533,13 @@ struct VerifyRunner {
         sm.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: clock))
         expect(sm.isFollowingAgents && sm.isRunning, "A fresh quiet-then-active cycle re-arms auto-follow")
         sm.switchRunningMode(to: .keepDisplay)
-        expect(sm.isRunning && !sm.isFollowingAgents && sm.activeMode == .keepDisplay, "Switching mode promotes auto-follow to a manual session")
+        expect(sm.isRunning && sm.isFollowingAgents && sm.activeMode == .keepDisplay, "Switching display mode preserves auto-follow session")
+        sm.handleAgentActivity(.inactive)
+        expect(!sm.isRunning, "Auto-follow session in Keep Display mode still releases when agents go quiet")
+        sm.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: clock))
+        expect(sm.isFollowingAgents, "Auto-follow restarts on new activity")
+        sm.promoteAutoFollowToManual()
+        expect(sm.isRunning && !sm.isFollowingAgents, "Explicit manual promotion converts to a manual session")
         sm.handleAgentActivity(.inactive)
         expect(sm.isRunning, "Promoted manual session survives agents going quiet")
         sm.stopSession(reason: .manual)

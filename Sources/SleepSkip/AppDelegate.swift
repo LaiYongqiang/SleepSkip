@@ -1,4 +1,5 @@
 import Cocoa
+import Combine
 import Darwin
 import Foundation
 import SleepSkipCore
@@ -37,6 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var pendingURLs: [URL] = []
     private var pendingOpenRequest = false
     private var isTerminating = false
+    private let layoutModel = PopoverLayoutModel()
+    private var popoverResizeCancellables: Set<AnyCancellable> = []
+    private var pendingResizeScheduled = false
 
     private let isolatedSuiteName: String?
     private lazy var store: PreferencesStore = {
@@ -521,10 +525,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.animates = false
         popover.delegate = self
 
-        let rootView = SleepSkipPopoverView(manager: sessionManager)
-        let hostingController = NSHostingController(rootView: rootView)
-        hostingController.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = hostingController
+        let rootView = SleepSkipPopoverView(manager: sessionManager, layoutModel: layoutModel)
+        let hostingView = NSHostingView(rootView: rootView)
+        let controller = NSViewController()
+        controller.view = hostingView
+        popover.contentViewController = controller
+
+        sessionManager.objectWillChange
+            .sink { [weak self] _ in self?.schedulePopoverResize() }
+            .store(in: &popoverResizeCancellables)
+        layoutModel.objectWillChange
+            .sink { [weak self] _ in self?.schedulePopoverResize() }
+            .store(in: &popoverResizeCancellables)
+    }
+
+    private func schedulePopoverResize() {
+        guard !pendingResizeScheduled, popover.isShown else { return }
+        pendingResizeScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.pendingResizeScheduled = false
+            guard self.popover.isShown else { return }
+            self.applyPopoverFittingSize()
+        }
+    }
+
+    private func applyPopoverFittingSize() {
+        guard let view = popover.contentViewController?.view else { return }
+        view.layoutSubtreeIfNeeded()
+        let fitting = view.fittingSize
+        guard fitting.width > 0, fitting.height > 0 else { return }
+        if abs(popover.contentSize.width - fitting.width) > 1 || abs(popover.contentSize.height - fitting.height) > 1 {
+            popover.contentSize = fitting
+        }
     }
 
     private func setupKeyboardShortcuts() {
@@ -533,6 +566,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
             // Cmd + , -> toggle settings
             if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "," {
+                self.sessionManager.refreshClaudeHookStatus()
                 self.sessionManager.showSettings.toggle()
                 return nil
             }
@@ -563,6 +597,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
                 if self.sessionManager.showSettings {
                     return event
+                }
+                if self.sessionManager.isAuthorizing {
+                    return nil
                 }
                 if self.sessionManager.isRunning {
                     self.closePopover()
@@ -600,13 +637,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         sessionManager.refreshClaudeHookStatus()
         refreshAvailableAgentSourcesIfChanged()
 
-        if let view = popover.contentViewController?.view {
-            view.layoutSubtreeIfNeeded()
-            let fitting = view.fittingSize
-            if fitting.width > 0, fitting.height > 0 {
-                popover.contentSize = fitting
-            }
+        let screen = button.window?.screen ?? NSScreen.main ?? NSScreen.screens.first
+        let availableHeight = screen?.visibleFrame.height ?? 720
+        let cappedHeight = min(620, max(340, floor(availableHeight - 72)))
+        if abs(layoutModel.maxPopoverHeight - cappedHeight) > 1 {
+            layoutModel.maxPopoverHeight = cappedHeight
         }
+
+        applyPopoverFittingSize()
 
         NSApp.activate(ignoringOtherApps: true)
 
@@ -705,7 +743,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         menu.addItem(.separator())
 
-        if sessionManager.isRunning {
+        if sessionManager.isAuthorizing {
+            let cancelItem = NSMenuItem(title: t.cancelLaunchButton, action: #selector(menuCancelAuthorization), keyEquivalent: "")
+            cancelItem.target = self
+            menu.addItem(cancelItem)
+        } else if sessionManager.isRunning {
             let stopItem = NSMenuItem(title: t.menuStop, action: #selector(menuStop), keyEquivalent: "")
             stopItem.target = self
             menu.addItem(stopItem)
@@ -752,6 +794,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func menuStop() {
         sessionManager.stopSession(reason: .manual)
+    }
+
+    @objc private func menuCancelAuthorization() {
+        sessionManager.cancelAuthorization()
     }
 
     @objc private func menuLockScreen() {
@@ -812,7 +858,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
 
         let t = sessionManager.l10n
-        if sessionManager.isRunning {
+        if sessionManager.isAuthorizing {
+            button.toolTip = "\(t.appName) — \(t.authorizingTitle)"
+        } else if sessionManager.isRunning {
             let modeTxt = t.modeTitle(sessionManager.activeMode)
             let lidTxt = closedLid ? " · \(t.backpackBadge)" : ""
             button.toolTip = "\(t.appName) — \(t.runningBadge) (\(modeTxt)\(lidTxt))"
@@ -821,6 +869,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         } else {
             button.toolTip = "\(t.appName) — \(t.idleBadge)"
         }
+        button.setAccessibilityLabel(button.toolTip)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
