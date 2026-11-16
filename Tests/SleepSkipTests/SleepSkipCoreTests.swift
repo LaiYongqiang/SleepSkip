@@ -1682,4 +1682,132 @@ struct SleepSkipCoreTests {
         #expect(en.returnToAutoFollowButton(dropsClosedLid: true).contains("lid"))
     }
 
+    @Test func hookProtectionStatusDistinguishesPendingAuthorizationWithAndWithoutExistingSession() throws {
+        enum AuthOutcome { case succeed, fail, cancel }
+
+        // 1. No existing session while authorizing: must report not holding, never manual protection.
+        for outcome in [AuthOutcome.succeed, .fail, .cancel] {
+            let bag = MockBackpackGuard()
+            bag.deferEnableCompletion = true
+            let (manager, defaults, suite) = try makeManager(caf: MockCaffeinateRunner(), bag: bag)
+            defer { defaults.removePersistentDomain(forName: suite) }
+
+            manager.setAutoFollowEnabled(false)
+            manager.setClosedLidStrategy(.privileged)
+            manager.setAllowClosedLid(true)
+            manager.startConfiguredSession()
+            #expect(manager.isAuthorizing && !manager.isRunning)
+
+            manager.handleHookStart(sessionID: "pending-hook", agent: "claude-code")
+            #expect(manager.hookProtectionStatus == .waitingForAuthorization(existingProtection: nil))
+
+            switch outcome {
+            case .succeed:
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && !manager.isAuthorizing)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            case .fail:
+                bag.shouldFailEnable = true
+                bag.finishPendingEnable()
+                #expect(!manager.isRunning && !manager.isAuthorizing)
+                #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+            case .cancel:
+                manager.cancelAuthorization()
+                #expect(!manager.isRunning && !manager.isAuthorizing)
+                #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+                bag.finishPendingEnable()
+                #expect(!manager.isRunning)
+                #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+            }
+        }
+
+        // 2. Existing manual session running while replacement authorization is pending.
+        for outcome in [AuthOutcome.succeed, .fail, .cancel] {
+            let bag = MockBackpackGuard()
+            let (manager, defaults, suite) = try makeManager(caf: MockCaffeinateRunner(), bag: bag)
+            defer { defaults.removePersistentDomain(forName: suite) }
+
+            manager.setAutoFollowEnabled(false)
+            manager.startConfiguredSession()
+            #expect(manager.isRunning && !manager.isFollowingAgents)
+
+            bag.deferEnableCompletion = true
+            manager.setClosedLidStrategy(.privileged)
+            manager.setAllowClosedLid(true)
+            manager.startConfiguredSession()
+            manager.handleHookStart(sessionID: "manual-replacement-hook", agent: "claude-code")
+            #expect(manager.hookProtectionStatus == .waitingForAuthorization(existingProtection: .manual))
+
+            switch outcome {
+            case .succeed:
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && !manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            case .fail:
+                bag.shouldFailEnable = true
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && !manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            case .cancel:
+                manager.cancelAuthorization()
+                #expect(manager.isRunning && !manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            }
+        }
+
+        // 3. Existing auto-follow session running while replacement authorization is pending.
+        for outcome in [AuthOutcome.succeed, .fail, .cancel] {
+            let bag = MockBackpackGuard()
+            let (manager, defaults, suite) = try makeManager(caf: MockCaffeinateRunner(), bag: bag)
+            defer { defaults.removePersistentDomain(forName: suite) }
+
+            manager.setAutoFollowEnabled(false)
+            manager.handleHookStart(sessionID: "auto-replacement-hook", agent: "claude-code")
+            #expect(manager.isRunning && manager.isFollowingAgents)
+
+            bag.deferEnableCompletion = true
+            manager.setClosedLidStrategy(.privileged)
+            manager.setAllowClosedLid(true)
+            manager.startConfiguredSession()
+            #expect(manager.hookProtectionStatus == .waitingForAuthorization(existingProtection: .autoFollow))
+
+            switch outcome {
+            case .succeed:
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && !manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            case .fail:
+                bag.shouldFailEnable = true
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .holding)
+            case .cancel:
+                manager.cancelAuthorization()
+                #expect(manager.isRunning && manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .holding)
+            }
+        }
+
+        // 4. R1 & R2 localized copy verification (ZH & EN).
+        let zh = L10n(language: .zhHans)
+        let en = L10n(language: .en)
+        let noSessionDetailZh = try #require(zh.claudeHookStatusDetail(.waitingForAuthorization(existingProtection: nil)))
+        let noSessionDetailEn = try #require(en.claudeHookStatusDetail(.waitingForAuthorization(existingProtection: nil)))
+        #expect(noSessionDetailZh.contains("尚未保持唤醒"))
+        #expect(!noSessionDetailZh.contains("由手动会话保持"))
+        #expect(noSessionDetailEn.contains("not holding wake protection yet"))
+        #expect(!noSessionDetailEn.contains("manual protection currently owns"))
+
+        let manualExistingDetailZh = try #require(zh.claudeHookStatusDetail(.waitingForAuthorization(existingProtection: .manual)))
+        let manualExistingDetailEn = try #require(en.claudeHookStatusDetail(.waitingForAuthorization(existingProtection: .manual)))
+        #expect(manualExistingDetailZh.contains("原有手动会话保持唤醒"))
+        #expect(manualExistingDetailEn.contains("existing manual session holds wake protection"))
+
+        let manualStandbyZh = try #require(zh.claudeHookStatusDetail(.standbyBehindManual))
+        let manualStandbyEn = try #require(en.claudeHookStatusDetail(.standbyBehindManual))
+        #expect(!manualStandbyZh.contains("将接管"))
+        #expect(manualStandbyZh.contains("暂停规则"))
+        #expect(manualStandbyEn.contains("manual stop pauses following"))
+    }
+
 }

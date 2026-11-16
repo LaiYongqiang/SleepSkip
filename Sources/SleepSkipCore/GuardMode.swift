@@ -84,11 +84,17 @@ public enum AutoFollowSourceKind: Equatable, Sendable {
     case both
 }
 
+public enum ExistingProtectionKind: Equatable, Sendable {
+    case manual
+    case autoFollow
+}
+
 public enum HookProtectionStatus: Equatable, Sendable {
     case none
     case holding
     case paused(limitReached: Bool)
     case standbyBehindManual
+    case waitingForAuthorization(existingProtection: ExistingProtectionKind?)
 }
 
 public struct PendingAuthorizationLaunch: Equatable, Sendable {

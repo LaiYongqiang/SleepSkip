@@ -128,6 +128,8 @@ struct SleepSkipPopoverView: View {
         Text(text)
             .font(.system(size: 11, weight: .medium))
             .foregroundColor(color)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
             .background(Capsule().fill(color.opacity(0.14)))
@@ -1447,6 +1449,12 @@ struct SleepSkipPopoverView: View {
             case .holding: return .blue
             case .paused: return .orange
             case .standbyBehindManual: return .secondary
+            case .waitingForAuthorization(let existing):
+                switch existing {
+                case .none: return .orange
+                case .manual: return .secondary
+                case .autoFollow: return .blue
+                }
             }
         }()
 

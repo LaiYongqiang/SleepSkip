@@ -344,7 +344,16 @@ public struct L10n {
             }
             return isZh ? "已暂停" : "Paused"
         case .standbyBehindManual:
-            return isZh ? "待命 · 手动优先" : "Queued · Manual Active"
+            return isZh ? "手动优先" : "Manual Priority"
+        case .waitingForAuthorization(let existing):
+            switch existing {
+            case .none:
+                return isZh ? "待授权 · 未保持" : "Auth · Not Holding"
+            case .manual:
+                return isZh ? "待授权 · 手动保持" : "Auth · Manual Held"
+            case .autoFollow:
+                return isZh ? "待授权 · 跟随保持" : "Auth · Follow Held"
+            }
         }
     }
     public func claudeHookStatusDetail(_ status: HookProtectionStatus) -> String? {
@@ -366,8 +375,23 @@ public struct L10n {
                 : "Hook session is active, but auto-following is paused (not holding wake protection)."
         case .standbyBehindManual:
             return isZh
-                ? "检测到进行中的 Hook 会话；当前由手动会话保持唤醒，手动结束后若仍活跃将接管。"
-                : "Hook session is active; manual protection currently owns the wake assertion."
+                ? "检测到进行中的 Hook 会话；当前由手动会话保持唤醒，可主动切回自动跟随；手动停止后需按暂停规则恢复。"
+                : "Hook session is active; a manual session currently holds wake protection. You can switch back to auto-follow, while a manual stop pauses following until recovery."
+        case .waitingForAuthorization(let existing):
+            switch existing {
+            case .none:
+                return isZh
+                    ? "检测到进行中的 Hook 会话；正在等待管理员授权，当前尚未保持唤醒。"
+                    : "Hook session is active; waiting for administrator authorization (not holding wake protection yet)."
+            case .manual:
+                return isZh
+                    ? "检测到进行中的 Hook 会话；正在等待替换授权，当前仍由原有手动会话保持唤醒。"
+                    : "Hook session is active; waiting for replacement authorization while the existing manual session holds wake protection."
+            case .autoFollow:
+                return isZh
+                    ? "当前 Hook 会话正通过旧的自动跟随保持唤醒，同时正在等待新手动会话的管理员授权。"
+                    : "Hook session is holding wake protection via the current auto-follow session while waiting for replacement authorization."
+            }
         }
     }
     public var claudeHookConnectButton: String { isZh ? "连接 Hook" : "Connect" }

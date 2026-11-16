@@ -214,10 +214,16 @@ public final class SessionManager: ObservableObject {
 
     private func computeHookProtectionStatus() -> HookProtectionStatus {
         guard hasActiveHookSessions else { return .none }
+        if isAuthorizing {
+            if isRunning {
+                return .waitingForAuthorization(existingProtection: isFollowingAgents ? .autoFollow : .manual)
+            }
+            return .waitingForAuthorization(existingProtection: nil)
+        }
         if isRunning && isFollowingAgents {
             return .holding
         }
-        if isRunning || isAuthorizing {
+        if isRunning {
             return .standbyBehindManual
         }
         return .paused(limitReached: autoFollowLimitReached)
