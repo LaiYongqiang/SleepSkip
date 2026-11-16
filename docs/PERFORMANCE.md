@@ -69,4 +69,9 @@ idle power budget via `scripts/bench_gate.sh`:
 It launches the app with `--isolated` in a closed-panel idle state, waits 3 seconds for AppKit
 startup to settle, and runs `scripts/bench_idle.swift` over a 20-second window with threshold
 assertions (`--max-cpu-ms 15.0 --max-wakeups 25`, configurable via `WINDOW_SECONDS`,
-`MAX_CPU_MS`, and `MAX_WAKEUPS`). The gate covers isolated idle with directory auto-follow disabled. It cannot detect regressions that only occur during automatic following, hooks, or active lid suppression; these require separate state-specific measurements.
+`SETTLE_SECONDS`, `MAX_CPU_MS`, and `MAX_WAKEUPS`). When `COMPARE_BASELINE=1` is set (as in CI and
+Release workflows), the script also measures a minimal AppKit status-item process on the same host
+and allows up to `MAX_WAKEUP_OVERHEAD` (default `25`) additional wakeups above that host baseline.
+The gate covers isolated idle with directory auto-follow disabled. It cannot detect regressions
+that only occur during automatic following, hooks, or active lid suppression; these require separate
+state-specific measurements.

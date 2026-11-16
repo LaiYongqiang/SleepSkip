@@ -45,7 +45,7 @@ jobs:
       - name: Enforce idle power release gate
         run: |
           chmod +x scripts/bench_gate.sh
-          ./scripts/bench_gate.sh dist/SleepSkip.app/Contents/MacOS/SleepSkip
+          COMPARE_BASELINE=1 ./scripts/bench_gate.sh dist/SleepSkip.app/Contents/MacOS/SleepSkip
 
       - name: Verify terminal and CLI lifecycle
         run: SLEEPSKIP_BINARY="$PWD/dist/SleepSkip.app/Contents/MacOS/SleepSkip" python3 scripts/verify_cli.py

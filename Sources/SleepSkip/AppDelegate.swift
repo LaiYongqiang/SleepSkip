@@ -15,7 +15,7 @@ enum IPCNotifications {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem!
-    private var popover: NSPopover!
+    private var popover: NSPopover?
     private var popoverPinObservers: [NSObjectProtocol] = []
     private var isParkingPopover = false
     private var displayTimer: Timer?
@@ -94,7 +94,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         setupDistributedNotifications()
         setupWorkspaceNotifications()
         setupStatusItem()
-        setupPopover()
         setupKeyboardShortcuts()
 
         configureSessionCallbacks()
@@ -518,8 +517,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
-    private func setupPopover() {
-        popover = NSPopover()
+    @discardableResult
+    private func ensurePopover() -> NSPopover {
+        if let popover {
+            return popover
+        }
+        let popover = NSPopover()
         popover.behavior = .transient
         // Disable AppKit's built-in popover transition so SwiftUI content appears cleanly without horizontal clipping.
         popover.animates = false
@@ -537,21 +540,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         layoutModel.objectWillChange
             .sink { [weak self] _ in self?.schedulePopoverResize() }
             .store(in: &popoverResizeCancellables)
+
+        self.popover = popover
+        return popover
     }
 
     private func schedulePopoverResize() {
-        guard !pendingResizeScheduled, popover.isShown else { return }
+        guard !pendingResizeScheduled, popover?.isShown == true else { return }
         pendingResizeScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.pendingResizeScheduled = false
-            guard self.popover.isShown else { return }
+            guard self.popover?.isShown == true else { return }
             self.applyPopoverFittingSize()
         }
     }
 
     private func applyPopoverFittingSize() {
-        guard let view = popover.contentViewController?.view else { return }
+        guard let popover, let view = popover.contentViewController?.view else { return }
         view.layoutSubtreeIfNeeded()
         let fitting = view.fittingSize
         guard fitting.width > 0, fitting.height > 0 else { return }
@@ -562,7 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func setupKeyboardShortcuts() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.popover.isShown else { return event }
+            guard let self, self.popover?.isShown == true else { return event }
 
             // Cmd + , -> toggle settings
             if event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "," {
@@ -622,7 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func togglePopover() {
-        if popover.isShown {
+        if popover?.isShown == true {
             closePopover()
         } else {
             showPopover()
@@ -631,6 +637,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func showPopover() {
         guard let button = statusItem.button else { return }
+        let popover = ensurePopover()
         sessionManager.reconcileOnWakeOrShow()
         sessionManager.refreshStaleSleepState()
         sessionManager.refreshCLIInstallStatus()
@@ -713,7 +720,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// itself is off-screen (e.g. hidden by a menu bar manager).
     private func parkPopoverAtScreenCorner() {
         guard !isParkingPopover,
-              let popoverWindow = popover.contentViewController?.view.window,
+              let popoverWindow = popover?.contentViewController?.view.window,
               let screen = NSScreen.main ?? NSScreen.screens.first else { return }
 
         let visible = screen.visibleFrame
@@ -729,7 +736,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func closePopover() {
-        popover.performClose(nil)
+        popover?.performClose(nil)
         stopDisplayTimer()
     }
 
@@ -835,7 +842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func startDisplayTimer() {
         stopDisplayTimer()
         let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self, self.popover.isShown else { return }
+            guard let self, self.popover?.isShown == true else { return }
             self.sessionManager.refreshDisplayTick()
         }
         RunLoop.main.add(timer, forMode: .common)
