@@ -27,11 +27,30 @@ func sample(_ pid: pid_t) -> (cpuMillis: Double, wakeups: UInt64, idleWakeups: U
 }
 
 let arguments = CommandLine.arguments
-guard arguments.count >= 2, let pid = pid_t(arguments[1]) else {
-    FileHandle.standardError.write(Data("usage: bench_idle <pid> [seconds]\n".utf8))
+var positional: [String] = []
+var maxCpuMs: Double?
+var maxWakeups: UInt64?
+
+var idx = 1
+while idx < arguments.count {
+    let arg = arguments[idx]
+    if arg == "--max-cpu-ms", idx + 1 < arguments.count {
+        maxCpuMs = Double(arguments[idx + 1])
+        idx += 2
+    } else if arg == "--max-wakeups", idx + 1 < arguments.count {
+        maxWakeups = UInt64(arguments[idx + 1])
+        idx += 2
+    } else {
+        positional.append(arg)
+        idx += 1
+    }
+}
+
+guard !positional.isEmpty, let pid = pid_t(positional[0]) else {
+    FileHandle.standardError.write(Data("usage: bench_idle <pid> [seconds] [--max-cpu-ms <ms>] [--max-wakeups <n>]\n".utf8))
     exit(2)
 }
-let seconds = arguments.count >= 3 ? (Double(arguments[2]) ?? 120) : 120
+let seconds = positional.count >= 2 ? (Double(positional[1]) ?? 120) : 120
 
 guard let before = sample(pid) else {
     FileHandle.standardError.write(Data("cannot read rusage for pid \(pid)\n".utf8))
@@ -53,3 +72,13 @@ print(String(
     format: "window=%.0fs cpu=%.3fms wakeups=%llu pkg_idle_wakeups=%llu",
     seconds, cpuDelta, wakeupDelta, idleWakeupDelta
 ))
+
+if let maxCpuMs, cpuDelta > maxCpuMs {
+    FileHandle.standardError.write(Data(String(format: "FAIL: idle CPU %.3fms exceeded gate %.3fms\n", cpuDelta, maxCpuMs).utf8))
+    exit(1)
+}
+
+if let maxWakeups, wakeupDelta > maxWakeups {
+    FileHandle.standardError.write(Data("FAIL: idle wakeups \(wakeupDelta) exceeded gate \(maxWakeups)\n".utf8))
+    exit(1)
+}

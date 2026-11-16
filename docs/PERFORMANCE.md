@@ -39,10 +39,9 @@ of what macOS imposes on any status item.
 
 This is also the honest limit of the claim: **an AppKit menu bar app cannot have zero wakeups.**
 macOS gives every status item a baseline heartbeat. Several SleepSkip runs came out slightly
-lower than the minimal baseline, which is run-to-run noise rather than a real advantage. The
-precise claim is therefore **"no timers and no polling of our own while the panel is closed"**,
-not "zero wakeups" — the weak version is easy for a reviewer to disprove and costs more
-credibility than the precise one buys.
+lower than the minimal baseline, which is run-to-run noise rather than a real advantage. These are historical 1.2.0 samples, not measurements of the current full feature set. The idle
+claim is **"no periodic polling in ordinary closed-panel idle"**,
+not "zero wakeups". The standard closed-lid strategy now also uses a 5-second re-arm timer while engaged; that active mode is outside these historical idle samples.
 
 ## What this rules out
 
@@ -57,3 +56,17 @@ Measured on the same machine while evaluating the auto-follow design:
 Polling costs two orders of magnitude more CPU than event-driven watching, and — more
 importantly — wakes the CPU once per second, which is exactly the thing a battery-conscious
 tool should not do.
+
+## Automated Release Power Gate
+
+Both CI (`.github/workflows/ci.yml`) and Releases (`.github/workflows/release.yml`) enforce an
+idle power budget via `scripts/bench_gate.sh`:
+
+```bash
+./scripts/bench_gate.sh dist/SleepSkip.app/Contents/MacOS/SleepSkip
+```
+
+It launches the app with `--isolated` in a closed-panel idle state, waits 3 seconds for AppKit
+startup to settle, and runs `scripts/bench_idle.swift` over a 20-second window with threshold
+assertions (`--max-cpu-ms 15.0 --max-wakeups 25`, configurable via `WINDOW_SECONDS`,
+`MAX_CPU_MS`, and `MAX_WAKEUPS`). The gate covers isolated idle with directory auto-follow disabled. It cannot detect regressions that only occur during automatic following, hooks, or active lid suppression; these require separate state-specific measurements.

@@ -13,20 +13,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run unit and lifecycle tests
+      - name: Run Swift Testing suite
         run: swift test
 
-      # XCTest is unavailable with Command Line Tools only, where `swift test` reports
-      # "0 tests" and exits 0. verify.sh is the entry point that actually asserts behaviour.
       - name: Run verification suite
         run: |
           chmod +x scripts/verify.sh
           ./scripts/verify.sh
+          bash scripts/verify_release.sh
 
       - name: Build release .app bundle and DMG
         run: |
           chmod +x scripts/build_app.sh
           ./scripts/build_app.sh
+
+      - name: Enforce idle power gate
+        run: |
+          chmod +x scripts/bench_gate.sh
+          ./scripts/bench_gate.sh dist/SleepSkip.app/Contents/MacOS/SleepSkip
+
+      - name: Verify terminal and CLI lifecycle
+        run: SLEEPSKIP_BINARY="$PWD/dist/SleepSkip.app/Contents/MacOS/SleepSkip" python3 scripts/verify_cli.py
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

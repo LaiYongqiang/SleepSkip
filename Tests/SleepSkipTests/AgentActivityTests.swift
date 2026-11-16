@@ -1,9 +1,9 @@
-#if canImport(XCTest)
 import Foundation
-import XCTest
+import Testing
 @testable import SleepSkipCore
 
-final class AgentActivityTests: XCTestCase {
+@Suite("Agent Activity")
+final class AgentActivityTests {
     private var clock: Date = Date(timeIntervalSince1970: 1_700_000_000)
     private func advance(_ seconds: TimeInterval) { clock = clock.addingTimeInterval(seconds) }
 
@@ -13,106 +13,149 @@ final class AgentActivityTests: XCTestCase {
         AgentActivityTracker(policy: policy, nowProvider: { self.clock })
     }
 
-    func testFreshTrackerIsInactive() {
-        XCTAssertEqual(makeTracker().evaluate(), .inactive)
+    @Test func freshTrackerIsInactive() {
+        #expect(makeTracker().evaluate() == .inactive)
     }
 
-    func testRecordedActivityIsActive() {
+    @Test func recordedActivityIsActive() {
         let tracker = makeTracker()
         tracker.recordActivity(sourceID: "claude-code")
         guard case .active(let agents, let lastActivity) = tracker.evaluate() else {
-            return XCTFail("expected active")
+            Issue.record("expected active")
+            return
         }
-        XCTAssertEqual(agents, ["claude-code"])
-        XCTAssertEqual(lastActivity, clock)
-        XCTAssertTrue(tracker.shouldHoldAssertion(for: tracker.evaluate()))
+        #expect(agents == ["claude-code"])
+        #expect(lastActivity == clock)
+        #expect(tracker.shouldHoldAssertion(for: tracker.evaluate()))
     }
 
-    func testQuietInsideWindowStaysActive() {
+    @Test func quietInsideWindowStaysActive() {
         let tracker = makeTracker()
         tracker.recordActivity(sourceID: "claude-code")
         advance(20)
-        XCTAssertTrue(tracker.evaluate().isHolding)
+        #expect(tracker.evaluate().isHolding)
     }
 
-    func testQuietPastWindowEntersGrace() {
+    @Test func quietPastWindowEntersGrace() {
         let tracker = makeTracker()
         tracker.recordActivity(sourceID: "claude-code")
         advance(60)
         guard case .grace = tracker.evaluate() else {
-            return XCTFail("expected grace")
+            Issue.record("expected grace")
+            return
         }
-        XCTAssertTrue(tracker.shouldHoldAssertion(for: tracker.evaluate()))
+        #expect(tracker.shouldHoldAssertion(for: tracker.evaluate()))
     }
 
-    func testQuietPastGraceReleases() {
+    @Test func quietPastGraceReleases() {
         let tracker = makeTracker()
         tracker.recordActivity(sourceID: "claude-code")
         advance(30 + 300 + 1)
-        XCTAssertEqual(tracker.evaluate(), .inactive)
-        XCTAssertFalse(tracker.shouldHoldAssertion(for: tracker.evaluate()))
+        #expect(tracker.evaluate() == .inactive)
+        #expect(!tracker.shouldHoldAssertion(for: tracker.evaluate()))
     }
 
-    func testParallelSessionsHoldWhileAnyIsActive() {
+    @Test func parallelSessionsHoldWhileAnyIsActive() {
         let tracker = makeTracker()
         tracker.recordActivity(sourceID: "claude-code")
         advance(10)
         tracker.recordActivity(sourceID: "codex")
         advance(25) // claude-code is quiet, codex still active
         guard case .active(let agents, _) = tracker.evaluate() else {
-            return XCTFail("expected active")
+            Issue.record("expected active")
+            return
         }
-        XCTAssertEqual(agents, ["codex"])
+        #expect(agents == ["codex"])
     }
 
-    func testHardCeilingReleasesEvenWhenActive() {
+    @Test func hardCeilingReleasesEvenWhenActive() {
         let tracker = makeTracker(policy: AgentActivityPolicy(activityWindow: 30, gracePeriod: 300, maxAutoSessionDuration: 120))
         // Keep the agent writing past the ceiling.
         for _ in 0..<10 {
             tracker.recordActivity(sourceID: "claude-code")
             advance(20)
         }
-        XCTAssertTrue(tracker.autoSessionExceeded())
-        XCTAssertFalse(tracker.shouldHoldAssertion(for: tracker.evaluate()))
+        #expect(tracker.autoSessionExceeded())
+        #expect(!tracker.shouldHoldAssertion(for: tracker.evaluate()))
 
         // Hitting the ceiling must not disable auto-follow for the rest of the app's lifetime.
         tracker.restartSessionWindow()
         tracker.recordActivity(sourceID: "claude-code")
-        XCTAssertFalse(tracker.autoSessionExceeded())
-        XCTAssertTrue(tracker.shouldHoldAssertion(for: tracker.evaluate()))
+        #expect(!tracker.autoSessionExceeded())
+        #expect(tracker.shouldHoldAssertion(for: tracker.evaluate()))
     }
 
-    func testResetClearsSession() {
+    @Test func resetClearsSession() {
         let tracker = makeTracker()
         tracker.recordActivity(sourceID: "claude-code")
         advance(200)
         tracker.reset()
-        XCTAssertEqual(tracker.evaluate(), .inactive)
-        XCTAssertFalse(tracker.autoSessionExceeded())
+        #expect(tracker.evaluate() == .inactive)
+        #expect(!tracker.autoSessionExceeded())
     }
 
-    func testDefaultSourcesPointAtTranscriptDirectories() {
+    @Test func defaultSourcesPointAtTranscriptDirectories() {
         let home = URL(fileURLWithPath: "/Users/example")
         let sources = AgentSource.defaults(homeDirectory: home)
-        XCTAssertEqual(sources.map(\.id), ["claude-code", "codex", "dsh"])
-        XCTAssertEqual(sources[0].path, "/Users/example/.claude/projects")
-        XCTAssertEqual(sources[2].path, "/Users/example/.dsh/sessions")
+        #expect(sources.map(\.id) == ["claude-code", "codex", "dsh", "gemini-cli", "opencode"])
+        #expect(sources[0].path == "/Users/example/.claude/projects")
+        #expect(sources[2].path == "/Users/example/.dsh/sessions")
+        #expect(sources[3].path == "/Users/example/.gemini/tmp")
+        #expect(sources[4].path == "/Users/example/.local/share/opencode")
     }
 
-    func testTranscriptSuffixesArePerSource() {
+    @Test func transcriptSuffixesArePerSource() {
         let home = URL(fileURLWithPath: "/Users/example")
         let sources = AgentSource.defaults(homeDirectory: home)
         let claude = sources[0]
         let dsh = sources[2]
 
         // DSH writes compressed transcripts, so a plain `.jsonl` check would miss it entirely.
-        XCTAssertTrue(dsh.matches(filePath: "/Users/example/.dsh/sessions/p/session.v4.jsonl.zstd"))
-        XCTAssertTrue(dsh.matches(filePath: "/Users/example/.dsh/sessions/p/s.jsonl"))
-        XCTAssertFalse(claude.matches(filePath: "/Users/example/.claude/projects/p/s.jsonl.zstd"))
-        XCTAssertTrue(claude.matches(filePath: "/Users/example/.claude/projects/p/s.jsonl"))
+        #expect(dsh.matches(filePath: "/Users/example/.dsh/sessions/p/session.v4.jsonl.zstd"))
+        #expect(dsh.matches(filePath: "/Users/example/.dsh/sessions/p/s.jsonl"))
+        #expect(!claude.matches(filePath: "/Users/example/.claude/projects/p/s.jsonl.zstd"))
+        #expect(claude.matches(filePath: "/Users/example/.claude/projects/p/s.jsonl"))
 
         // A sibling directory sharing the prefix must not be attributed to the source.
-        XCTAssertFalse(dsh.matches(filePath: "/Users/example/.dsh/sessions-old/s.jsonl"))
+        #expect(!dsh.matches(filePath: "/Users/example/.dsh/sessions-old/s.jsonl"))
     }
+    @Test func freshTaskGetsANewCeilingAfterARealQuietInterval() {
+        let tracker = makeTracker(policy: AgentActivityPolicy(activityWindow: 5, gracePeriod: 10, maxAutoSessionDuration: 30))
+        tracker.recordActivity(sourceID: "Claude Code")
+        advance(16)
+        // No evaluate callback is required between tasks: the gap itself separates sessions.
+        tracker.recordActivity(sourceID: "Codex")
+        advance(16)
+        #expect(!tracker.autoSessionExceeded())
+        tracker.recordActivity(sourceID: "Codex")
+        advance(31)
+        #expect(tracker.evaluate() == .inactive)
+        #expect(!tracker.autoSessionExceeded())
+    }
+
+    @Test func matchingResolvesSymlinksAndOnlyRejectsWholeNoiseDirectories() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("ss-path-\(UUID().uuidString)")
+        let target = base.appendingPathComponent("real")
+        let link = base.appendingPathComponent("linked")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let source = AgentSource(id: "custom-original", displayName: "Custom", path: link.path, fileSuffixes: [])
+        #expect(source.matches(filePath: target.appendingPathComponent("session.jsonl").path))
+        #expect(source.matches(filePath: link.appendingPathComponent("project-node_modules/session.jsonl").path))
+        #expect(!source.matches(filePath: link.appendingPathComponent("node_modules/session.jsonl").path))
+        #expect(!source.matches(filePath: link.appendingPathComponent("../outside.jsonl").path))
+        let temporarySource = AgentSource(id: "temp", displayName: "Temp", path: "/tmp/ss-path", fileSuffixes: [])
+        #expect(temporarySource.matches(filePath: "/private/tmp/ss-path/session.txt"))
+        #expect(source.id == "custom-original")
+    }
+
+    @Test func ceilingCheckDoesNotReportAnAlreadyQuietSession() {
+        let tracker = makeTracker(policy: AgentActivityPolicy(activityWindow: 5, gracePeriod: 10, maxAutoSessionDuration: 30))
+        tracker.recordActivity(sourceID: "codex")
+        advance(31)
+        // The monitor checks the ceiling before evaluating the display state.
+        #expect(!tracker.autoSessionExceeded())
+    }
+
 }
-#endif

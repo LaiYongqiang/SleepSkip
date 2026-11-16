@@ -47,122 +47,166 @@ final class CaffeinateRunner: CaffeinateRunning {
 }
 
 final class BackpackGuard: BackpackGuarding {
-    private var sentinelProcess: Process?
-    private var sentinelPipe: Pipe?
+    private final class Attempt {
+        let token = UUID()
+        let process: Process
+        let pipe: Pipe
+        let scriptURL: URL
+        var pidURL: URL { scriptURL.appendingPathExtension("pid") }
+        var readyURL: URL { scriptURL.appendingPathExtension("ready") }
+        init(process: Process, pipe: Pipe, scriptURL: URL) {
+            self.process = process; self.pipe = pipe; self.scriptURL = scriptURL
+        }
+        func cancel() {
+            try? pipe.fileHandleForWriting.close()
+            if process.isRunning { process.terminate() }
+            // Removing the script also prevents an authorization dialog accepted after cancel
+            // from starting this attempt. Each attempt has its own script and pid file.
+            try? FileManager.default.removeItem(at: scriptURL)
+            try? FileManager.default.removeItem(at: readyURL)
+            if let raw = try? String(contentsOf: pidURL, encoding: .utf8),
+               let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+               ProcessArguments.mentions(pid: pid, scriptName: scriptURL.lastPathComponent) {
+                kill(pid, SIGTERM)
+            }
+            try? FileManager.default.removeItem(at: pidURL)
+        }
+    }
+    typealias Authorizer = (String, @escaping (Result<Void, Error>) -> Void) -> Void
+    private var attempt: Attempt?
+    private let authorize: Authorizer
+    private let storageDirectory: URL
+    private let sleepChecker: ((@escaping (Bool) -> Void) -> Void)?
+    private let readinessChecker: (URL) -> Bool
 
-    /// Path of the detached guard script, so a leftover run can be terminated on next launch.
+    init(storageDirectory: URL? = nil, authorization: Authorizer? = nil,
+         sleepChecker: ((@escaping (Bool) -> Void) -> Void)? = nil,
+         readinessChecker: @escaping (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) {
+        self.storageDirectory = storageDirectory ?? URL(fileURLWithPath: Self.scriptPath).deletingLastPathComponent()
+        self.sleepChecker = sleepChecker
+        self.readinessChecker = readinessChecker
+        self.authorize = authorization ?? { command, completion in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var error: NSDictionary?
+                let source = "do shell script \"\(command)\" with administrator privileges"
+                let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
+                let outcome: Result<Void, Error>
+                if result != nil { outcome = .success(()) }
+                else {
+                    outcome = .failure(NSError(domain: "SleepSkip.BackpackGuard",
+                        code: (error?[NSAppleScript.errorNumber] as? Int) ?? -1,
+                        userInfo: [NSLocalizedDescriptionKey: (error?[NSAppleScript.errorMessage] as? String) ?? "Authorization failed"]))
+                }
+                DispatchQueue.main.async { completion(outcome) }
+            }
+        }
+    }
+
+    deinit { attempt?.cancel() }
+
+    /// Legacy location is retained only for one-time cleanup of versions before attempt tokens.
     static var scriptPath: String {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("SleepSkip", isDirectory: true)
-        let base = dir ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("SleepSkip", isDirectory: true) ?? URL(fileURLWithPath: NSTemporaryDirectory())
         return base.appendingPathComponent("lid-guard.sh").path
     }
-
     static var pidPath: String { scriptPath + ".pid" }
-
-    var isActive: Bool {
-        sentinelProcess?.isRunning ?? false
-    }
+    var isActive: Bool { attempt?.process.isRunning ?? false }
 
     func enable(completion: @escaping (Result<Void, Error>) -> Void) {
         disable()
-
         let pipe = Pipe()
-        let cat = Process()
-        cat.executableURL = URL(fileURLWithPath: "/bin/cat")
-        cat.standardInput = pipe
-        cat.standardOutput = FileHandle.nullDevice
-        cat.standardError = FileHandle.nullDevice
-
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/cat")
+        process.standardInput = pipe
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let current = Attempt(process: process, pipe: pipe,
+            scriptURL: storageDirectory.appendingPathComponent("lid-guard-\(UUID().uuidString).sh"))
         do {
-            try cat.run()
+            try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+            try process.run()
+            let script = Self.watchScript(watchPID: process.processIdentifier, readyURL: current.readyURL)
+            try script.write(to: current.scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: current.scriptURL.path)
         } catch {
-            completion(.failure(error))
-            return
+            current.cancel(); completion(.failure(error)); return
         }
-
-        sentinelPipe = pipe
-        sentinelProcess = cat
-        let watchPID = cat.processIdentifier
-
-        // Write the script to disk and launch it detached. Running it through
-        // `do shell script` would block on the output pipe held by the backgrounded child,
-        // leaving the UI spinning while the authorization had in fact succeeded.
-        let scriptURL = URL(fileURLWithPath: Self.scriptPath)
-        do {
-            try CommandBuilder.closedLidWatchScript(watchPID: watchPID).write(to: scriptURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
-        } catch {
-            disable()
-            completion(.failure(error))
-            return
-        }
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            var errorDict: NSDictionary?
-            let command = CommandBuilder.closedLidLaunchScript(
-                scriptPath: scriptURL.path,
-                pidPath: Self.pidPath
-            )
-            let source = "do shell script \"\(command)\" with administrator privileges"
-            let result = NSAppleScript(source: source)?.executeAndReturnError(&errorDict)
-
-            guard result != nil else {
-                DispatchQueue.main.async {
-                    self.disable()
-                    let code = (errorDict?[NSAppleScript.errorNumber] as? Int) ?? -1
-                    let msg = (errorDict?[NSAppleScript.errorMessage] as? String) ?? "Authorization failed"
-                    completion(.failure(NSError(domain: "SleepSkip.BackpackGuard", code: code, userInfo: [
-                        NSLocalizedDescriptionKey: msg
-                    ])))
-                }
+        attempt = current
+        let command = Self.serializedLaunchCommand(scriptURL: current.scriptURL, pidURL: current.pidURL,
+            lockURL: storageDirectory.appendingPathComponent("lid-guard.lock"))
+        authorize(command) { [weak self, current] result in
+            guard let self, self.attempt === current else {
+                current.cancel()
+                completion(.failure(NSError(domain: "SleepSkip.BackpackGuard", code: NSUserCancelledError)))
                 return
             }
-
-            // `do shell script` exits 0 as long as the shell itself succeeded, which says nothing
-            // about whether `pmset` actually took effect (MDM policy, a pmset change, or a script
-            // that never launched all still exit 0). Read the real state back before reporting
-            // success, so the UI cannot claim "Backpack running" while lid sleep is still enabled.
-            self.verifySleepDisabled(retriesRemaining: 10) { verified in
-                DispatchQueue.main.async {
-                    if verified {
-                        completion(.success(()))
-                    } else {
+            switch result {
+            case .failure(let error):
+                self.disable(); completion(.failure(error))
+            case .success:
+                self.verifySleepDisabled(attempt: current, retriesRemaining: 25) { [weak self, current] verified in
+                    guard let self, self.attempt === current else {
+                        current.cancel()
+                        completion(.failure(NSError(domain: "SleepSkip.BackpackGuard", code: NSUserCancelledError)))
+                        return
+                    }
+                    if verified { completion(.success(())) }
+                    else {
                         self.disable()
-                        completion(.failure(NSError(domain: "SleepSkip.BackpackGuard", code: -2, userInfo: [
-                            NSLocalizedDescriptionKey: "Lid-close sleep was not disabled. The guard may have been blocked by a system policy."
-                        ])))
+                        completion(.failure(NSError(domain: "SleepSkip.BackpackGuard", code: -2,
+                            userInfo: [NSLocalizedDescriptionKey: "Lid-close sleep was not disabled. The guard may have been blocked by a system policy."])))
                     }
                 }
             }
         }
     }
 
-    /// Polls `SleepDisabled` until it reads 1 or the retries run out.
-    ///
-    /// The guard script disables sleep asynchronously, so an immediate read can race it. Ten
-    /// attempts 200 ms apart give it 2 s, which is far longer than the script needs.
-    private func verifySleepDisabled(retriesRemaining: Int, completion: @escaping (Bool) -> Void) {
-        checkSleepDisabledAsync { disabled in
-            if disabled {
-                completion(true)
-            } else if retriesRemaining > 0 {
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.2) {
-                    self.verifySleepDisabled(retriesRemaining: retriesRemaining - 1, completion: completion)
+    static func watchScript(watchPID: Int32, readyURL: URL,
+                            powerCommand: String = "/usr/bin/pmset",
+                            waitCommand: String = "/usr/bin/caffeinate") -> String {
+        let power = CommandBuilder.shellSingleQuoted(powerCommand)
+        let wait = CommandBuilder.shellSingleQuoted(waitCommand)
+        let readyPath = CommandBuilder.shellSingleQuoted(readyURL.path)
+        let cleanup = CommandBuilder.shellSingleQuoted("/bin/rm -f \(readyPath); \(power) -a disablesleep 0")
+        return """
+        #!/bin/sh
+        /bin/kill -0 \(watchPID) 2>/dev/null || exit 0
+        \(power) -a disablesleep 1 || exit 1
+        trap \(cleanup) EXIT
+        trap 'exit 0' INT TERM
+        /usr/bin/touch \(readyPath)
+        \(wait) -i -w \(watchPID) >/dev/null 2>&1
+        """
+    }
+
+    /// Keep the lock inode and hold it through the script's EXIT restoration. A replacement
+    /// guard cannot set the shared flag until its predecessor has restored and exited.
+    static func serializedLaunchCommand(scriptURL: URL, pidURL: URL, lockURL: URL) -> String {
+        let script = CommandBuilder.shellSingleQuoted(scriptURL.path)
+        let pid = CommandBuilder.shellSingleQuoted(pidURL.path)
+        let lock = CommandBuilder.shellSingleQuoted(lockURL.path)
+        return "nohup /usr/bin/lockf -k -t 3 \(lock) /bin/sh \(script) >/dev/null 2>&1 & echo $! > \(pid)"
+    }
+
+    private func verifySleepDisabled(attempt current: Attempt, retriesRemaining: Int, completion: @escaping (Bool) -> Void) {
+        guard attempt === current else { completion(false); return }
+        checkSleepDisabledAsync { [weak self] disabled in
+            guard let self, self.attempt === current else { completion(false); return }
+            if disabled && self.readinessChecker(current.readyURL) { completion(true) }
+            else if retriesRemaining > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    guard let self else { completion(false); return }
+                    self.verifySleepDisabled(attempt: current, retriesRemaining: retriesRemaining - 1, completion: completion)
                 }
-            } else {
-                completion(false)
-            }
+            } else { completion(false) }
         }
     }
 
     func disable() {
-        try? sentinelPipe?.fileHandleForWriting.close()
-        sentinelPipe = nil
-        sentinelProcess?.terminate()
-        sentinelProcess = nil
-        Self.terminateDetachedGuard()
+        let old = attempt
+        attempt = nil
+        old?.cancel()
     }
 
     /// Stops a guard script left running by a previous session. Without this, a crash or force-quit
@@ -200,6 +244,7 @@ final class BackpackGuard: BackpackGuarding {
     }
 
     func checkSleepDisabledAsync(completion: @escaping (Bool) -> Void) {
+        if let sleepChecker { sleepChecker(completion); return }
         DispatchQueue.global(qos: .utility).async {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
@@ -352,6 +397,34 @@ final class PowerMonitor: PowerMonitoring {
     deinit {
         stop()
     }
+
+    /// Reads active system sleep assertions once on demand (never polled).
+    static func fetchAssertions(completion: @escaping ([AssertionOwner]) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let proc = Process()
+            let pipe = Pipe()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+            proc.arguments = ["-g", "assertions"]
+            proc.standardOutput = pipe
+            proc.standardError = FileHandle.nullDevice
+
+            var parsed: [AssertionOwner] = []
+            do {
+                try proc.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                if let text = String(data: data, encoding: .utf8) {
+                    parsed = PowerOutputParser.parseAssertions(fromPmsetOutput: text)
+                }
+            } catch {
+                parsed = []
+            }
+
+            DispatchQueue.main.async {
+                completion(parsed)
+            }
+        }
+    }
 }
 
 final class ScreenLocker: ScreenLocking {
@@ -421,4 +494,182 @@ final class LoginItemManager: LoginItemControlling {
             }
         }
     }
+}
+
+/// Event-driven thermal observer backed by `ProcessInfo.thermalStateDidChangeNotification`.
+/// Consumes zero background CPU or wakeups when the system stays below the configured threshold.
+final class ThermalMonitor: ThermalMonitoring {
+    private var observer: NSObjectProtocol?
+    private var cutoff: ThermalCutoff = .critical
+    private var onOverheated: (() -> Void)?
+
+    func isOverheated(cutoff: ThermalCutoff) -> Bool {
+        Self.exceeds(ProcessInfo.processInfo.thermalState, cutoff: cutoff)
+    }
+
+    func start(cutoff: ThermalCutoff, onOverheated: @escaping () -> Void) {
+        stop()
+        guard cutoff != .off else { return }
+        self.cutoff = cutoff
+        self.onOverheated = onOverheated
+
+        observer = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.evaluate()
+        }
+        evaluate()
+    }
+
+    func stop() {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+            self.observer = nil
+        }
+        onOverheated = nil
+    }
+
+    private func evaluate() {
+        guard let onOverheated, Self.exceeds(ProcessInfo.processInfo.thermalState, cutoff: cutoff) else {
+            return
+        }
+        stop()
+        DispatchQueue.main.async {
+            onOverheated()
+        }
+    }
+
+    static func exceeds(_ state: ProcessInfo.ThermalState, cutoff: ThermalCutoff) -> Bool {
+        switch cutoff {
+        case .off:
+            return false
+        case .serious:
+            return state == .serious || state == .critical
+        case .critical:
+            return state == .critical
+        }
+    }
+
+    deinit {
+        stop()
+    }
+}
+
+final class CLICommandInstaller: CLIInstalling {
+    private var bundleExecutablePath: String? {
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              let exec = Bundle.main.executablePath,
+              FileManager.default.isExecutableFile(atPath: exec) else {
+            return nil
+        }
+        return exec
+    }
+
+    func currentStatus() -> CLIInstallStatus {
+        guard let exec = bundleExecutablePath else {
+            return .unavailable
+        }
+        let targetResolved = URL(fileURLWithPath: exec).resolvingSymlinksInPath().path
+        let candidates = [
+            "/opt/homebrew/bin/sleepskip",
+            "/usr/local/bin/sleepskip",
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/sleepskip").path,
+        ]
+        for path in candidates {
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+            if resolved == targetResolved {
+                return .installed(path: path)
+            }
+        }
+        return .notInstalled
+    }
+
+    func install(completion: @escaping (Result<String, Error>) -> Void) {
+        guard let exec = bundleExecutablePath else {
+            completion(.failure(NSError(
+                domain: "SleepSkip.CLIInstaller",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "CLI installation is only available from SleepSkip.app."]
+            )))
+            return
+        }
+
+        let fm = FileManager.default
+        let preferredDir = fm.isWritableFile(atPath: "/opt/homebrew/bin")
+            ? "/opt/homebrew/bin"
+            : "/usr/local/bin"
+        let linkPath = (preferredDir as NSString).appendingPathComponent("sleepskip")
+
+        // Use direct filesystem symlink when writable; fall back to standard admin prompt otherwise.
+        if fm.isWritableFile(atPath: preferredDir) || (!fm.fileExists(atPath: preferredDir) && fm.isWritableFile(atPath: (preferredDir as NSString).deletingLastPathComponent)) {
+            do {
+                try fm.createDirectory(atPath: preferredDir, withIntermediateDirectories: true)
+                if fm.fileExists(atPath: linkPath) {
+                    try fm.removeItem(atPath: linkPath)
+                }
+                try fm.createSymbolicLink(atPath: linkPath, withDestinationPath: exec)
+                completion(.success(linkPath))
+                return
+            } catch {
+                // Fall through to privileged symlink creation if direct write fails.
+            }
+        }
+
+        let quotedExec = CommandBuilder.shellSingleQuoted(exec)
+        let quotedLink = CommandBuilder.shellSingleQuoted("/usr/local/bin/sleepskip")
+        let shellCmd = "mkdir -p /usr/local/bin && ln -sf \(quotedExec) \(quotedLink)"
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var errorDict: NSDictionary?
+            let script = NSAppleScript(source: "do shell script \"\(shellCmd)\" with administrator privileges")
+            let result = script?.executeAndReturnError(&errorDict)
+            DispatchQueue.main.async {
+                if result != nil {
+                    completion(.success("/usr/local/bin/sleepskip"))
+                } else {
+                    let msg = (errorDict?[NSAppleScript.errorMessage] as? String) ?? "Failed to install CLI symlink"
+                    completion(.failure(NSError(
+                        domain: "SleepSkip.CLIInstaller",
+                        code: -2,
+                        userInfo: [NSLocalizedDescriptionKey: msg]
+                    )))
+                }
+            }
+        }
+    }
+}
+
+/// An isolated window exercises the interface without acquiring shared system resources.
+/// Every dependency is inert, including settings actions such as lock, hooks and CLI install.
+final class IsolatedSystemServices: CaffeinateRunning, BackpackGuarding, ClosedLidGuarding,
+    PowerMonitoring, ThermalMonitoring, ScreenLocking, UserNotifying, LoginItemControlling,
+    CLIInstalling, ClaudeHookControlling {
+    private(set) var isActive = false
+    private(set) var isEngaged = false
+    var isEnabled = false
+    var isConnected = false
+    func start(mode: GuardMode, timeoutSeconds: Int?, onUnexpectedExit: @escaping () -> Void) throws { isActive = true }
+    func stop() { isActive = false }
+    func enable(completion: @escaping (Result<Void, Error>) -> Void) { isEngaged = true; completion(.success(())) }
+    func disable() { isEngaged = false }
+    func checkSleepDisabledAsync(completion: @escaping (Bool) -> Void) { completion(false) }
+    func restoreNormalSleepAsync(completion: @escaping (Result<Void, Error>) -> Void) { completion(.success(())) }
+    func currentPowerSnapshot() -> PowerSnapshot? { nil }
+    func start(thresholdPercent: Int, stopOnUnplug: Bool, onEvent: @escaping (PowerEvent) -> Void) {}
+    func isOverheated(cutoff: ThermalCutoff) -> Bool { false }
+    func start(cutoff: ThermalCutoff, onOverheated: @escaping () -> Void) {}
+    func lockScreen() {}
+    func preparePermissionIfNeeded() {}
+    func send(title: String, body: String) {}
+    func setEnabled(_ enabled: Bool) throws { isEnabled = enabled }
+    func currentStatus() -> CLIInstallStatus { .unavailable }
+    func install(completion: @escaping (Result<String, Error>) -> Void) {
+        completion(.failure(NSError(domain: "SleepSkip.Isolated", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Installation is disabled in isolated mode."])))
+    }
+    func connect() throws {}
+    func disconnect() throws {}
 }

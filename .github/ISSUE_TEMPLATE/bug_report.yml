@@ -1,0 +1,30 @@
+name: Bug Report
+description: Report unexpected sleep behavior, UI issues, or high idle power usage
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! SleepSkip prioritizes ultra-low idle power and zero leaked sleep assertions.
+  - type: input
+    id: version
+    attributes:
+      label: SleepSkip Version & macOS Version
+      description: Output of `sleepskip --version` and `sw_vers -productVersion`
+      placeholder: "e.g. SleepSkip 1.6.0 on macOS 15.4 (Apple Silicon)"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What happened & steps to reproduce
+      description: Describe what you did (manual mode, auto-follow, closed-lid, hook, or CLI wrapper) and what went wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (optional, zero sensitive content)
+      description: If relevant, paste `sleepskip status --json` or `pmset -g assertions | head -n 40` (or idle measurement via `swift scripts/bench_idle.swift "$(pgrep -x SleepSkip)" 20`).
+      render: shell

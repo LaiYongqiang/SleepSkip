@@ -83,9 +83,9 @@ func renderIcon(size: Int) -> NSBitmapImageRep {
     cg.strokePath()
     cg.restoreGState()
 
-    // Center SF Symbol: moon.zzz.fill
-    if let sym = NSImage(systemSymbolName: "moon.zzz.fill", accessibilityDescription: nil) {
-        let cfg = NSImage.SymbolConfiguration(pointSize: s * 0.38, weight: .semibold)
+    // Center SF Symbol: cup.and.saucer.fill
+    if let sym = NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: nil) {
+        let cfg = NSImage.SymbolConfiguration(pointSize: s * 0.35, weight: .semibold)
             .applying(NSImage.SymbolConfiguration(paletteColors: [
                 NSColor(red: 0.94, green: 0.97, blue: 1.0, alpha: 1.0)
             ]))

@@ -111,6 +111,30 @@ final class MockLoginItem: LoginItemControlling {
     func setEnabled(_ enabled: Bool) throws { isEnabled = enabled }
 }
 
+final class MockThermalMonitor: ThermalMonitoring {
+    var overheated = false
+    var triggerHandler: (() -> Void)?
+    func isOverheated(cutoff: ThermalCutoff) -> Bool {
+        cutoff != .off && overheated
+    }
+    func start(cutoff: ThermalCutoff, onOverheated: @escaping () -> Void) {
+        triggerHandler = cutoff == .off ? nil : onOverheated
+    }
+    func stop() {
+        triggerHandler = nil
+    }
+}
+
+final class MockCLIInstaller: CLIInstalling {
+    var status: CLIInstallStatus = .notInstalled
+    func currentStatus() -> CLIInstallStatus { status }
+    func install(completion: @escaping (Result<String, Error>) -> Void) {
+        let path = "/usr/local/bin/sleepskip"
+        status = .installed(path: path)
+        completion(.success(path))
+    }
+}
+
 @main
 struct VerifyRunner {
     static func main() throws {
@@ -325,6 +349,39 @@ struct VerifyRunner {
         manager.reconcileOnWakeOrShow()
         expect(!manager.isRunning && notif.sent.count == 1, "Wake reconcile catches exited caffeinate and notifies once")
 
+        // When wall-clock time passes endDate while caffeinate is still alive (e.g. after sleep),
+        // reconcileOnWakeOrShow and refreshDisplayTick must stop the session as expired.
+        do {
+            let cafExp = MockCaffeinateRunner()
+            let notifExp = MockNotifier()
+            var expNow = Date(timeIntervalSince1970: 1_700_000_000)
+            let suiteExp = "io.github.laiyongqiang.SleepSkip.wallclock.\(UUID().uuidString)"
+            let defaultsExp = UserDefaults(suiteName: suiteExp)!
+            defer { defaultsExp.removePersistentDomain(forName: suiteExp) }
+            let smExp = SessionManager(
+                store: PreferencesStore(defaults: defaultsExp),
+                caffeinateRunner: cafExp,
+                backpackGuard: MockBackpackGuard(),
+                powerMonitor: MockPowerMonitor(),
+                screenLocker: MockScreenLocker(),
+                notifier: notifExp,
+                loginItem: MockLoginItem(),
+                nowProvider: { expNow }
+            )
+            smExp.selectDuration(60)
+            smExp.startConfiguredSession()
+            expect(smExp.isRunning && cafExp.isActive, "Wall-clock expiry test session started")
+            expNow = expNow.addingTimeInterval(3605)
+            smExp.reconcileOnWakeOrShow()
+            expect(!smExp.isRunning && !cafExp.isActive && notifExp.sent.count == 1, "Reconcile stops session when wall-clock passes endDate")
+
+            smExp.startConfiguredSession()
+            expect(smExp.isRunning, "Second wall-clock expiry test session started")
+            expNow = expNow.addingTimeInterval(3600)
+            smExp.refreshDisplayTick()
+            expect(!smExp.isRunning && !cafExp.isActive && notifExp.sent.count == 2, "Display tick stops session at endDate")
+        }
+
         // Regression: stopping while Touch ID was pending launched the session anyway, because
         // the completion only compared its token and `stopSession` never invalidated it.
         do {
@@ -458,18 +515,28 @@ struct VerifyRunner {
             checkStaleSleepOnInit: false
         )
         sm.setAutoFollowEnabled(true)
+        sm.selectDuration(30)
         sm.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: clock))
         expect(sm.isFollowingAgents && sm.isRunning, "Auto-follow engages on activity")
-        // Regression: the panel read 00:00:00 because `remainingSeconds` was never computed.
-        expect(sm.remainingSeconds > 0, "Auto-follow populates the countdown immediately")
+        expect(sm.remainingSeconds == 7200, "Auto-follow uses policy ceiling rather than manual preset")
         expect(sm.endDate != nil, "Auto-follow sets an end date")
+        sm.handleAgentActivity(.grace(since: clock))
+        expect(sm.autoFollowGraceEndDate != nil && sm.autoFollowGraceRemainingSeconds == 300, "Grace period populates grace countdown")
+        sm.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: clock))
+        expect(sm.autoFollowGraceEndDate == nil && sm.autoFollowGraceRemainingSeconds == 0, "Resumed activity clears grace countdown")
         sm.stopSession(reason: .manual)
         expect(!sm.isFollowingAgents && !sm.isRunning, "Manual stop ends the automatic session")
+        expect(sm.isAutoFollowEnabled, "Manual stop preserves the auto-follow preference")
         sm.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: clock))
         expect(!sm.isRunning, "Activity right after a manual stop does not revive the session")
         sm.handleAgentActivity(.inactive)
         sm.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: clock))
         expect(sm.isFollowingAgents && sm.isRunning, "A fresh quiet-then-active cycle re-arms auto-follow")
+        sm.switchRunningMode(to: .keepDisplay)
+        expect(sm.isRunning && !sm.isFollowingAgents && sm.activeMode == .keepDisplay, "Switching mode promotes auto-follow to a manual session")
+        sm.handleAgentActivity(.inactive)
+        expect(sm.isRunning, "Promoted manual session survives agents going quiet")
+        sm.stopSession(reason: .manual)
         sm.setAutoFollowEnabled(false)
         expect(!sm.isRunning && !sm.isFollowingAgents, "Disabling auto-follow releases everything")
 
@@ -534,9 +601,11 @@ struct VerifyRunner {
 
         // Default sources point at transcript directories under the home folder.
         let sources = AgentSource.defaults(homeDirectory: URL(fileURLWithPath: "/Users/example"))
-        expect(sources.map(\.id) == ["claude-code", "codex", "dsh"], "Default agent sources")
+        expect(sources.map(\.id) == ["claude-code", "codex", "dsh", "gemini-cli", "opencode"], "Default agent sources")
         expect(sources[0].path == "/Users/example/.claude/projects", "Claude transcript path")
         expect(sources[2].path == "/Users/example/.dsh/sessions", "DSH transcript path")
+        expect(sources[3].path == "/Users/example/.gemini/tmp", "Gemini CLI transcript path")
+        expect(sources[4].path == "/Users/example/.local/share/opencode", "OpenCode transcript path")
 
         // Per-source transcript extensions: DSH compresses its transcripts.
         let dsh = sources[2]
@@ -605,6 +674,149 @@ struct VerifyRunner {
             cfg.closedLidStrategy = .privileged
             store.save(cfg)
             expect(store.load().closedLidStrategy == .privileged, "Strategy persists across reload")
+        }
+
+        // 4d. Thermal cutoff, session history, and CLI installer
+        do {
+            let thermalSuite = "io.github.laiyongqiang.SleepSkip.thermal.\(UUID().uuidString)"
+            let thermalDefaults = UserDefaults(suiteName: thermalSuite)!
+            defer { thermalDefaults.removePersistentDomain(forName: thermalSuite) }
+            let thermalStore = PreferencesStore(defaults: thermalDefaults)
+            let thermal = MockThermalMonitor()
+            let cliInstaller = MockCLIInstaller()
+            let thermalNotif = MockNotifier()
+            var thermalClock = Date(timeIntervalSince1970: 2_500_000_000)
+
+            let tm = SessionManager(
+                store: thermalStore,
+                caffeinateRunner: MockCaffeinateRunner(),
+                backpackGuard: MockBackpackGuard(),
+                powerMonitor: MockPowerMonitor(),
+                thermalMonitor: thermal,
+                screenLocker: MockScreenLocker(),
+                notifier: thermalNotif,
+                loginItem: MockLoginItem(),
+                cliInstaller: cliInstaller,
+                nowProvider: { thermalClock },
+                checkStaleSleepOnInit: false
+            )
+            expect(tm.config.thermalCutoff == .critical, "Thermal cutoff defaults to critical")
+            expect(tm.cliInstallStatus == .notInstalled, "CLI installer reports initial status")
+            tm.installCLICommand()
+            expect(tm.cliInstallStatus == .installed(path: "/usr/local/bin/sleepskip"), "CLI installer updates status on success")
+
+            thermal.overheated = true
+            tm.startConfiguredSession()
+            expect(!tm.isRunning && tm.errorMessage != nil, "Pre-flight thermal guard blocks launch when overheated")
+
+            thermal.overheated = false
+            tm.selectMode(.keepDisplay)
+            tm.startConfiguredSession()
+            expect(tm.isRunning, "Session launches normally once cool")
+            thermalClock = thermalClock.addingTimeInterval(180)
+            thermal.triggerHandler?()
+            expect(!tm.isRunning && thermalNotif.sent.count == 1, "Thermal event stops session and notifies once")
+            expect(tm.history.first?.stopReasonCode == "overheated", "History records thermal stop reason")
+
+            tm.setThermalCutoff(.serious)
+            expect(thermalStore.load().thermalCutoff == .serious, "Thermal cutoff persists across reload")
+            tm.clearHistory()
+            expect(tm.history.isEmpty && thermalStore.loadHistory().isEmpty, "Clearing history persists empty list")
+        }
+
+        // 4e. Expanded agents, custom folders, CLI status/control, assertion parser & runtime snapshot
+        do {
+            let configured = AgentSource.configured(
+                homeDirectory: URL(fileURLWithPath: "/Users/example"),
+                disabledSourceIDs: ["dsh"],
+                customPaths: ["/tmp/my-agent-logs"]
+            )
+            expect(configured.map(\.id) == ["claude-code", "codex", "gemini-cli", "opencode", "custom:/tmp/my-agent-logs"], "Configured sources honor disabled IDs and custom paths")
+            let custom = configured.last!
+            expect(custom.matches(filePath: "/tmp/my-agent-logs/run.log"), "Custom source matches regular files")
+            expect(!custom.matches(filePath: "/tmp/my-agent-logs/.DS_Store"), "Custom source skips dotfiles")
+            expect(!custom.matches(filePath: "/tmp/my-agent-logs/.git/index.lock"), "Custom source skips .git directory noise")
+            expect(!custom.matches(filePath: "/tmp/my-agent-logs/node_modules/pkg/index.js"), "Custom source skips node_modules noise")
+            expect(!custom.matches(filePath: "/tmp/my-agent-logs/run.lock"), "Custom source skips lockfiles")
+
+            expect(CLIParser.parse(arguments: ["SleepSkip", "status"]) == .status(json: false), "Parses sleepskip status")
+            expect(CLIParser.parse(arguments: ["SleepSkip", "status", "--json"]) == .status(json: true), "Parses sleepskip status --json")
+            expect(CLIParser.parse(arguments: ["SleepSkip", "stop"]) == .control(action: "stop"), "Parses sleepskip stop")
+            expect(CLIParser.parse(arguments: ["SleepSkip", "toggle"]) == .control(action: "toggle"), "Parses sleepskip toggle")
+
+            let sampleAssertions = """
+               pid 123(caffeinate): [0x0001000000100] 00:12:00 PreventUserIdleSystemSleep named: "caffeinate command-line assertion"
+               pid 456(coreaudiod): [0x0001000000101] 00:01:00 PreventUserIdleSystemSleep named: "audio"
+               pid 789(sharingd): [0x0001000000102] 00:00:05 BackgroundTask named: "handoff"
+            """
+            let parsedAssertions = PowerOutputParser.parseAssertions(fromPmsetOutput: sampleAssertions)
+            expect(parsedAssertions.count == 2 && parsedAssertions[0].processName == "caffeinate", "Parses sleep-preventing assertions cleanly")
+
+            let tmpSnap = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sleepskip-snap-\(UUID().uuidString).json")
+            defer { RuntimeStateSnapshot.remove(at: tmpSnap) }
+            let snap = RuntimeStateSnapshot(
+                appPID: 999,
+                isRunning: true,
+                isFollowingAgents: true,
+                followingAgents: ["gemini-cli"],
+                mode: .background,
+                closedLid: false,
+                isIndefinite: false,
+                endDate: Date(timeIntervalSince1970: 2_600_000_000),
+                externalCLI: nil,
+                updatedAt: Date(timeIntervalSince1970: 2_599_999_000)
+            )
+            RuntimeStateSnapshot.write(snap, to: tmpSnap)
+            expect(RuntimeStateSnapshot.read(from: tmpSnap) == snap, "RuntimeStateSnapshot round-trips")
+
+            // Multi-agent join updates runtime snapshot immediately while already following.
+            let snapSuite = "io.github.laiyongqiang.SleepSkip.snap.\(UUID().uuidString)"
+            let snapDefaults = UserDefaults(suiteName: snapSuite)!
+            defer { snapDefaults.removePersistentDomain(forName: snapSuite) }
+            let liveSnapURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sleepskip-live-\(UUID().uuidString).json")
+            defer { RuntimeStateSnapshot.remove(at: liveSnapURL) }
+            let smSnap = SessionManager(
+                store: PreferencesStore(defaults: snapDefaults),
+                caffeinateRunner: MockCaffeinateRunner(),
+                backpackGuard: MockBackpackGuard(),
+                powerMonitor: MockPowerMonitor(),
+                screenLocker: MockScreenLocker(),
+                notifier: MockNotifier(),
+                loginItem: MockLoginItem(),
+                runtimeStateURL: liveSnapURL,
+                runtimePID: 4242,
+                nowProvider: { Date(timeIntervalSince1970: 2_600_000_000) },
+                checkStaleSleepOnInit: false
+            )
+            smSnap.setAutoFollowEnabled(true)
+            smSnap.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: Date(timeIntervalSince1970: 2_600_000_000)))
+            expect(RuntimeStateSnapshot.read(from: liveSnapURL)?.followingAgents == ["Claude Code"], "Snapshot records first agent display name")
+            smSnap.handleAgentActivity(.active(agents: ["claude-code", "gemini-cli"], lastActivity: Date(timeIntervalSince1970: 2_600_000_010)))
+            expect(RuntimeStateSnapshot.read(from: liveSnapURL)?.followingAgents == ["Claude Code", "Gemini CLI"], "Snapshot updates when second agent joins")
+            smSnap.handleHookStart(sessionID: "hook-1", agent: "claude-code")
+            expect(smSnap.hasActiveHookSessions && smSnap.isRunning, "Hook start activates sleep guard")
+            smSnap.handleHookStart(sessionID: "hook-2", agent: "codex")
+            smSnap.handleHookStop(sessionID: "hook-1", agent: "claude-code")
+            expect(smSnap.isRunning && smSnap.followingAgents == ["Codex"], "Multi-session hook stays active until final stop")
+            smSnap.handleHookStop(sessionID: "hook-2", agent: "codex")
+            expect(!smSnap.hasActiveHookSessions && !smSnap.isRunning, "Final hook stop releases sleep guard immediately")
+            expect(smSnap.history.first?.stopReasonCode == "hookStop", "Hook stop records hookStop history reason")
+
+            // ClaudeCodeHookManager merges safely and disconnects cleanly.
+            let hookDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sleepskip-v-hook-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: hookDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: hookDir) }
+            let hookFile = hookDir.appendingPathComponent("settings.json")
+            try "{\"model\":\"opus\"}".write(to: hookFile, atomically: true, encoding: .utf8)
+            let hookMgr = ClaudeCodeHookManager(settingsURL: hookFile)
+            expect(!hookMgr.isConnected, "Hook starts disconnected")
+            try hookMgr.connect()
+            expect(hookMgr.isConnected, "Hook connect registers UserPromptSubmit and Stop")
+            try hookMgr.disconnect()
+            expect(!hookMgr.isConnected, "Hook disconnect removes SleepSkip hooks")
+            let preserved = String(data: try Data(contentsOf: hookFile), encoding: .utf8) ?? ""
+            expect(preserved.contains("opus"), "Hook disconnect preserves existing user settings")
+            expect(CLIParser.parse(arguments: ["SleepSkip", "doctor"]) == .doctor, "CLIParser parses doctor command")
         }
 
         // 5. Live caffeinate -w lifecycle check

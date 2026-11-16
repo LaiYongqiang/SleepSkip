@@ -1,0 +1,23 @@
+name: Feature / Agent Support Request
+description: Request support for a new AI coding agent directory or workflow integration
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: category
+    attributes:
+      label: Request Type
+      options:
+        - New AI coding agent transcript path / preset
+        - Hook / CLI / launcher integration
+        - Power safety or closed-lid improvement
+        - UI / Localization / Other
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: For a new AI agent, include its default transcript directory (e.g., `~/.agent/sessions`) and transcript filename suffixes (e.g., `.jsonl`). Note that SleepSkip avoids background polling when the popover is closed.
+    validations:
+      required: true

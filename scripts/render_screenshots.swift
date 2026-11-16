@@ -77,6 +77,8 @@ struct ScreenshotRenderer {
             checkStaleSleepOnInit: false
         )
         manager.config.language = .zhHans
+        manager.setAgentSources(AgentSource.defaults())
+        manager.config.autoFollowAgents = true
         manager.staleSleepDisabled = false
         manager.isRunning = false
 

@@ -1,6 +1,6 @@
 import Foundation
 
-public enum GuardMode: String, CaseIterable, Identifiable, Sendable {
+public enum GuardMode: String, CaseIterable, Identifiable, Codable, Sendable {
     /// Prevent idle system sleep while allowing the display to turn off.
     case background = "background"
     /// Prevent both idle system sleep and display sleep.
@@ -69,6 +69,51 @@ public enum ClosedLidStrategy: String, CaseIterable, Sendable {
     public var requiresAuthorization: Bool { self == .privileged }
 }
 
+public enum ThermalCutoff: String, CaseIterable, Identifiable, Sendable {
+    case off = "off"
+    case serious = "serious"
+    case critical = "critical"
+
+    public var id: String { rawValue }
+}
+
+public enum SessionTrigger: String, Codable, Sendable {
+    case manual
+    case autoFollow
+    case url
+}
+
+public struct SessionHistoryEntry: Codable, Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let trigger: SessionTrigger
+    public let mode: GuardMode
+    public let closedLid: Bool
+    public let agents: [String]
+    public let startedAt: Date
+    public let endedAt: Date
+    public let stopReasonCode: String
+
+    public init(
+        id: UUID = UUID(),
+        trigger: SessionTrigger,
+        mode: GuardMode,
+        closedLid: Bool,
+        agents: [String] = [],
+        startedAt: Date,
+        endedAt: Date,
+        stopReasonCode: String
+    ) {
+        self.id = id
+        self.trigger = trigger
+        self.mode = mode
+        self.closedLid = closedLid
+        self.agents = agents
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.stopReasonCode = stopReasonCode
+    }
+}
+
 public struct SessionConfig: Equatable, Sendable {
     public var mode: GuardMode
     public var durationMinutes: Double
@@ -78,7 +123,11 @@ public struct SessionConfig: Equatable, Sendable {
     public var closedLidStrategy: ClosedLidStrategy
     public var batteryThresholdPercent: Int
     public var stopOnUnplug: Bool
+    public var thermalCutoff: ThermalCutoff
     public var autoFollowAgents: Bool
+    public var disabledAgentSourceIDs: [String]
+    public var customAgentPaths: [String]
+    public var globalShortcutEnabled: Bool
     public var language: AppLanguage
 
     public init(
@@ -90,7 +139,11 @@ public struct SessionConfig: Equatable, Sendable {
         closedLidStrategy: ClosedLidStrategy = .unprivileged,
         batteryThresholdPercent: Int = 10,
         stopOnUnplug: Bool = false,
+        thermalCutoff: ThermalCutoff = .critical,
         autoFollowAgents: Bool = true,
+        disabledAgentSourceIDs: [String] = [],
+        customAgentPaths: [String] = [],
+        globalShortcutEnabled: Bool = true,
         language: AppLanguage = .system
     ) {
         self.mode = mode
@@ -101,7 +154,11 @@ public struct SessionConfig: Equatable, Sendable {
         self.closedLidStrategy = closedLidStrategy
         self.batteryThresholdPercent = batteryThresholdPercent
         self.stopOnUnplug = stopOnUnplug
+        self.thermalCutoff = thermalCutoff
         self.autoFollowAgents = autoFollowAgents
+        self.disabledAgentSourceIDs = disabledAgentSourceIDs
+        self.customAgentPaths = customAgentPaths
+        self.globalShortcutEnabled = globalShortcutEnabled
         self.language = language
     }
 
@@ -131,7 +188,7 @@ public enum PowerEvent: Equatable, Sendable {
     case unplugged
 }
 
-public struct ExternalCLISession: Equatable, Sendable {
+public struct ExternalCLISession: Codable, Equatable, Sendable {
     public let pid: Int32
     public let commandName: String
     public let mode: GuardMode
@@ -140,6 +197,89 @@ public struct ExternalCLISession: Equatable, Sendable {
         self.pid = pid
         self.commandName = commandName
         self.mode = mode
+    }
+}
+
+public struct AssertionOwner: Equatable, Identifiable, Sendable {
+    public let pid: Int32
+    public let processName: String
+    public let assertionType: String
+    public let reason: String
+
+    public var id: String { "\(pid)-\(assertionType)-\(reason)" }
+
+    public init(pid: Int32, processName: String, assertionType: String, reason: String) {
+        self.pid = pid
+        self.processName = processName
+        self.assertionType = assertionType
+        self.reason = reason
+    }
+}
+
+/// Snapshot persisted only when the GUI app's session state changes, allowing `sleepskip status`
+/// to report live status with zero IPC server or background polling overhead.
+public struct RuntimeStateSnapshot: Codable, Equatable, Sendable {
+    public let appPID: Int32
+    public let isRunning: Bool
+    public let isFollowingAgents: Bool
+    public let followingAgents: [String]
+    public let mode: GuardMode
+    public let closedLid: Bool
+    public let isIndefinite: Bool
+    public let endDate: Date?
+    public let externalCLI: ExternalCLISession?
+    public let updatedAt: Date
+
+    public init(
+        appPID: Int32,
+        isRunning: Bool,
+        isFollowingAgents: Bool,
+        followingAgents: [String],
+        mode: GuardMode,
+        closedLid: Bool,
+        isIndefinite: Bool,
+        endDate: Date?,
+        externalCLI: ExternalCLISession?,
+        updatedAt: Date
+    ) {
+        self.appPID = appPID
+        self.isRunning = isRunning
+        self.isFollowingAgents = isFollowingAgents
+        self.followingAgents = followingAgents
+        self.mode = mode
+        self.closedLid = closedLid
+        self.isIndefinite = isIndefinite
+        self.endDate = endDate
+        self.externalCLI = externalCLI
+        self.updatedAt = updatedAt
+    }
+
+    public static var defaultURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return appSupport
+            .appendingPathComponent("SleepSkip", isDirectory: true)
+            .appendingPathComponent("runtime-state.json")
+    }
+
+    public static func read(from url: URL = defaultURL) -> RuntimeStateSnapshot? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(RuntimeStateSnapshot.self, from: data)
+    }
+
+    public static func write(_ snapshot: RuntimeStateSnapshot, to url: URL = defaultURL) {
+        let dir = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(snapshot) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    public static func remove(at url: URL = defaultURL) {
+        try? FileManager.default.removeItem(at: url)
     }
 }
 
@@ -202,10 +342,21 @@ public enum URLCommandParser {
     }
 }
 
+public enum HookAction: String, Equatable, Sendable {
+    case start
+    case stop
+    case install
+    case uninstall
+}
+
 public enum CLICommand: Equatable, Sendable {
     case help
     case version
     case gui(openPopover: Bool)
+    case status(json: Bool)
+    case doctor
+    case control(action: String)
+    case hook(action: HookAction, sessionID: String?, agent: String, pid: Int32?)
     case watchPID(pid: Int32, mode: GuardMode, lockOnFinish: Bool)
     case runCommand(arguments: [String], mode: GuardMode, lockOnFinish: Bool)
     /// Arguments that match nothing. Reported as an error rather than launching the GUI, so a
@@ -273,6 +424,67 @@ public enum CLIParser {
             return .invalid("watch needs a numeric pid")
         }
 
+        if let first = args.first {
+            if first == "status" {
+                let extra = args.dropFirst()
+                let unknown = extra.first { $0 != "--json" }
+                if let unknown {
+                    return .invalid("unknown option '\(unknown)' for status")
+                }
+                return .status(json: extra.contains("--json"))
+            }
+            if first == "doctor" {
+                if args.count > 1 {
+                    return .invalid("unknown option '\(args[1])' for doctor")
+                }
+                return .doctor
+            }
+            if ["stop", "toggle", "lock"].contains(first), args.count == 1 {
+                return .control(action: first)
+            }
+            if first == "hook" {
+                guard args.count >= 2, let action = HookAction(rawValue: args[1].lowercased()) else {
+                    return .invalid("hook requires 'start', 'stop', 'install', or 'uninstall'")
+                }
+                if action == .install || action == .uninstall {
+                    if args.count > 2 {
+                        return .invalid("unknown option '\(args[2])' for hook \(action.rawValue)")
+                    }
+                    return .hook(action: action, sessionID: nil, agent: "claude-code", pid: nil)
+                }
+                var agent = "claude-code"
+                var sessionID: String? = nil
+                var pid: Int32? = nil
+                var index = 2
+                while index < args.count {
+                    let token = args[index]
+                    switch token {
+                    case "--agent", "-a":
+                        guard index + 1 < args.count, !args[index + 1].isEmpty else {
+                            return .invalid("\(token) requires an agent name")
+                        }
+                        agent = args[index + 1]
+                        index += 2
+                    case "--session", "-s":
+                        guard index + 1 < args.count, !args[index + 1].isEmpty else {
+                            return .invalid("\(token) requires a session id")
+                        }
+                        sessionID = args[index + 1]
+                        index += 2
+                    case "--pid", "-p":
+                        guard index + 1 < args.count, let parsedPID = Int32(args[index + 1]), parsedPID > 0 else {
+                            return .invalid("\(token) requires a numeric pid")
+                        }
+                        pid = parsedPID
+                        index += 2
+                    default:
+                        return .invalid("unknown option '\(token)' for hook")
+                    }
+                }
+                return .hook(action: action, sessionID: sessionID, agent: agent, pid: pid)
+            }
+        }
+
         // Anything left over is not a recognised invocation. Launching the GUI here used to make
         // a mistyped subcommand look like a no-op, which is confusing in a terminal.
         let unrecognised = args.filter { !$0.hasPrefix("-") }
@@ -284,11 +496,27 @@ public enum CLIParser {
 }
 
 public enum AppInfo {
-    /// Single source of truth for the version shown in the CLI banner and the settings panel.
-    /// The build script rewrites this value from the git tag, so it never drifts from the release.
-    public static let version = "1.5.0"
+    /// Packaging supplies the full release label without rewriting the source tree.
+    public static var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "SleepSkipReleaseVersion") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? "1.6.0"
+    }
 
     public static let repositoryURL = "https://github.com/LaiYongqiang/SleepSkip"
+
+    public static let claudeCodeHookSnippet = """
+    {
+      "hooks": {
+        "UserPromptSubmit": [{
+          "hooks": [{ "type": "command", "command": "sleepskip hook start --agent claude-code >/dev/null 2>&1 || true" }]
+        }],
+        "Stop": [{
+          "hooks": [{ "type": "command", "command": "sleepskip hook stop --agent claude-code >/dev/null 2>&1 || true" }]
+        }]
+      }
+    }
+    """
 }
 
 public enum CommandBuilder {
@@ -416,5 +644,47 @@ public enum PowerOutputParser {
             }
         }
         return false
+    }
+
+    /// Parses sleep-preventing assertions from `pmset -g assertions`.
+    public static func parseAssertions(fromPmsetOutput output: String) -> [AssertionOwner] {
+        let sleepTypes = [
+            "PreventUserIdleSystemSleep",
+            "PreventUserIdleDisplaySleep",
+            "NoIdleSleepAssertion",
+            "PreventSystemSleep",
+        ]
+        var results: [AssertionOwner] = []
+        var seen = Set<String>()
+
+        for rawLine in output.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("pid "),
+                  let matchedType = sleepTypes.first(where: { line.contains($0) }),
+                  let openParen = line.firstIndex(of: "("),
+                  let closeParen = line[openParen...].firstIndex(of: ")"),
+                  let pid = Int32(line[line.index(line.startIndex, offsetBy: 4)..<openParen]) else {
+                continue
+            }
+
+            let name = String(line[line.index(after: openParen)..<closeParen])
+            let reason: String
+            if let namedRange = line.range(of: "named: \"") {
+                let afterQuote = line[namedRange.upperBound...]
+                if let endQuote = afterQuote.firstIndex(of: "\"") {
+                    reason = String(afterQuote[..<endQuote])
+                } else {
+                    reason = ""
+                }
+            } else {
+                reason = ""
+            }
+
+            let entry = AssertionOwner(pid: pid, processName: name, assertionType: matchedType, reason: reason)
+            if seen.insert(entry.id).inserted {
+                results.append(entry)
+            }
+        }
+        return results
     }
 }

@@ -1,30 +1,36 @@
+import Cocoa
 import Foundation
 import IOKit.ps
 import SleepSkipCore
 
-/// Keeps lid-close sleep suppressed without any authorization.
+/// Suppresses lid-close sleep without any authorization.
 ///
-/// Event-driven only: the flag is re-armed when the power source changes, which is the one
-/// transition that can clear it. No timer runs while a session is active — re-arming once a
-/// second was implemented and measured, and it changed nothing: the machine still slept 7 s
-/// after a cable was reconnected, because powerd had already committed to the decision by
-/// then. Keeping the timer would have broken the "no timers while the panel is closed"
-/// promise for no benefit.
+/// Sets `kPMSetClamshellSleepState` (selector 12) and keeps it armed across power-source
+/// changes, display sleep, system wake, and a low-frequency periodic timer while active, since
+/// `powerd` can silently clear the selector over time or when the display turns off.
 ///
-/// Known gap, stated in the UI: with the lid already shut, **plugging the cable back in**
-/// sleeps the machine 6–9 s later. powerd's power-change path re-evaluates the lid without
-/// consulting selector 12. Unplugging is unaffected. Never Sleep has the identical limit; the
-/// privileged `pmset` path does not, which is why `ClosedLidStrategy` offers both.
+/// Known limit: with the lid already shut, **plugging the cable back in** sleeps the machine
+/// 6–9 s later because `powerd`'s power-change path re-evaluates the lid without consulting
+/// selector 12. Unplugging is unaffected. The privileged `pmset` path does not have this limit.
 final class UnprivilegedLidGuard: ClosedLidGuarding {
+    private static let rearmInterval: TimeInterval = 5.0
+
     private var runLoopSource: CFRunLoopSource?
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var rearmTimer: Timer?
     private var isActive = false
+    private let setSuppressed: (Bool) -> Bool
+
+    init(setSuppressed: @escaping (Bool) -> Bool = { ClamshellFlag.setLidSleepSuppressed($0) }) {
+        self.setSuppressed = setSuppressed
+    }
 
     var isEngaged: Bool { isActive }
 
     func enable(completion: @escaping (Result<Void, Error>) -> Void) {
         disable()
 
-        guard ClamshellFlag.setLidSleepSuppressed(true) else {
+        guard setSuppressed(true) else {
             completion(.failure(NSError(
                 domain: "SleepSkip.UnprivilegedLidGuard",
                 code: -1,
@@ -36,22 +42,33 @@ final class UnprivilegedLidGuard: ClosedLidGuarding {
 
         isActive = true
         startPowerSourceObserver()
+        startWorkspaceObservers()
+        startRearmTimer()
         completion(.success(()))
     }
 
     func disable() {
+        let wasEngaged = isActive
         isActive = false
+        rearmTimer?.invalidate()
+        rearmTimer = nil
+        let center = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers {
+            center.removeObserver(observer)
+        }
+        workspaceObservers.removeAll()
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
             runLoopSource = nil
         }
-        ClamshellFlag.setLidSleepSuppressed(false)
+        if wasEngaged { _ = setSuppressed(false) }
     }
 
-    /// A leftover flag would keep the Mac awake after a crash. The flag is process-independent,
-    /// so a relaunch simply re-arms it.
-    deinit {
-        ClamshellFlag.setLidSleepSuppressed(false)
+    deinit { disable() }
+
+    private func rearmIfActive() {
+        guard isActive else { return }
+        _ = setSuppressed(true)
     }
 
     private func startPowerSourceObserver() {
@@ -59,10 +76,31 @@ final class UnprivilegedLidGuard: ClosedLidGuarding {
         guard let source = IOPSNotificationCreateRunLoopSource({ context in
             guard let context else { return }
             let guardObject = Unmanaged<UnprivilegedLidGuard>.fromOpaque(context).takeUnretainedValue()
-            guard guardObject.isActive else { return }
-            ClamshellFlag.setLidSleepSuppressed(true)
+            guardObject.rearmIfActive()
         }, unmanagedSelf)?.takeRetainedValue() else { return }
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
         runLoopSource = source
+    }
+
+    private func startWorkspaceObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        let names: [Notification.Name] = [
+            NSWorkspace.screensDidSleepNotification,
+            NSWorkspace.didWakeNotification
+        ]
+        workspaceObservers = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.rearmIfActive()
+            }
+        }
+    }
+
+    private func startRearmTimer() {
+        let timer = Timer(timeInterval: Self.rearmInterval, repeats: true) { [weak self] _ in
+            self?.rearmIfActive()
+        }
+        timer.tolerance = 1.0
+        RunLoop.main.add(timer, forMode: .common)
+        rearmTimer = timer
     }
 }

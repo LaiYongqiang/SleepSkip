@@ -1,20 +1,26 @@
 # SleepSkip（惜眠）
 
-**Agent 没干完，Mac 不许睡。**
+**围绕 Agent 工作流，让 Mac 保持唤醒。**
 
-一个会**跟着 Agent 走**的 macOS 菜单栏 + CLI 防休眠工具：Claude Code、Codex、DeepSeek Harness 在写文件时按住睡眠，停笔 5 分钟后自动放手。
+原生 macOS 菜单栏 + CLI 防休眠工具。目录跟随以 Claude Code、Codex、Gemini CLI、OpenCode、DeepSeek Harness 的近期会话写入作为活动信号；也可通过显式 Hook 或包裹命令管理任务生命周期。
 
-[English](README.md) · [产品需求文档 (PRD)](docs/PRD.md) · [实测资源占用](docs/PERFORMANCE.md)
+[English](README.md) · [更新日志](CHANGELOG.md) · [产品需求文档 (PRD)](docs/PRD.md) · [实测资源占用](docs/PERFORMANCE.md) · [贡献指南](CONTRIBUTING.md)
 
-> **为什么不直接用 Amphetamine？** 它按**时长**保持唤醒，SleepSkip 按**任务**保持唤醒。它用 FSEvents 监听 Agent 的会话目录（只看文件变化，从不读取内容），Agent 提前收工就立刻省电，跑得久也不会被定时器掐断。
+## 30 秒快速上手
 
-| | Amphetamine / Caffeine | SleepSkip |
-| :--- | :--- | :--- |
-| 保持唤醒 | ✅ | ✅ |
-| 知道 Agent 什么时候收工 | ❌ | ✅ FSEvents，无轮询 |
-| 空闲 CPU | 菜单栏应用 | **120 秒 0.09–0.24 毫秒**（[实测](docs/PERFORMANCE.md)）|
-| 包裹命令（`sleepskip -- claude …`）| ❌ | ✅ 随命令退出 |
-| 合盖模式 | ⚠️ 不可靠 | ✅ 显式开关 + 看门狗 |
+```bash
+# 通过 Homebrew 一键安装 SleepSkip.app 与 sleepskip CLI
+brew install --cask laiyongqiang/tap/sleepskip
+
+# 或者直接包裹终端 Agent / 编译命令
+sleepskip -- codex "refactor auth module"
+```
+
+在菜单栏打开 SleepSkip 按一次 `Enter` 即可直启，或保持默认的 **自动跟随 Agent** 让工具在 Agent 写文件期间自动接管。（从 Release 手动下载时，也可在 **偏好设置** 中一键安装 `sleepskip` CLI 命令。）
+
+目录跟随采用启发式判断：每次写入记为 30 秒活动，再保留 5 分钟宽限期；每轮自动会话最多 2 小时。长时间不写会话文件的工具调用可能超出这个窗口。持续时间有明确要求时，可使用命令包裹或手动会话。
+
+[Beta 范围与验收清单](docs/BETA.md)记录验证边界、已知限制和恢复步骤。合盖模式仍属实验性功能，需要在具体硬件和 macOS 版本上验收。
 
 ---
 
@@ -28,23 +34,28 @@
 
 ## 核心特色
 
-- **自动跟随 AI Agent**（默认开启）：FSEvents 监听 Agent 的会话目录（`~/.claude/projects`、`~/.codex/sessions`、`~/.dsh/sessions`），Agent 写文件期间按住睡眠，停笔 5 分钟后释放。实测开销约 **每 20 秒 0.2 毫秒 CPU**，唤醒次数不多于菜单栏图标本身。进程轮询方案实测为每 30 秒 160 毫秒外加每秒一次唤醒，已否决。只观察文件变化，从不读取会话内容。手动会话始终优先，另有 2 小时硬上限防止意外整夜挂机。首次运行会说明监听了哪些目录，开关在偏好设置里。
-- **收起面板后零定时器、零轮询**：直接基于 macOS 原生 `/usr/bin/caffeinate`，倒计时定时器仅在 Popover 展开可见时运行。[实测](docs/PERFORMANCE.md)：空闲 120 秒仅消耗 0.09–0.24 毫秒 CPU——和一个只画菜单栏图标、什么都不做的 App 处于同一量级。
-- **零孤儿进程守护**：所有 `caffeinate` 子进程均通过 `-w <APP_PID>` 绑定生命周期，无论正常退出还是意外强杀，系统内核自动回收断言。
-- **记忆配置 + 一次回车直启**：自动记住上一次模式、锁屏/合盖选项与时长。打开面板按 `Enter` 即可按上次配置启动；支持不锁屏启动时留在本面板显示大号倒计时，按 `Enter` 或 `Esc` 随时收起。
-- **CLI 伴侣守护（`sleepskip -- <cmd>`）**：直接包裹终端中的 Agent 或编译命令，任务运行期间防休眠，任务结束瞬间释放断言并可选自动锁屏，菜单栏通过内核 `kqueue` 被动同步状态（实测：10 秒任务总共消耗 10 毫秒 CPU）。
+- **自动跟随 AI Agent 与自定义目录**（默认开启）：单个 FSEvents 流监听内置 Agent 目录（Claude Code、Codex、Gemini CLI、OpenCode、DeepSeek Harness）以及用户在偏好设置中添加的自定义目录（支持逐个勾选开关），Agent 写文件期间按住睡眠，停笔 5 分钟后自动释放。历史功耗数据及对应版本见[实测说明](docs/PERFORMANCE.md)。进程轮询方案实测为每 30 秒 160 毫秒外加每秒一次唤醒，已否决。只观察文件变化，从不读取会话内容。手动会话始终优先，另有 2 小时硬上限防止意外整夜挂机；运行中点击「停止本次跟随」仅结束当前会话并在下次静默后自动重新待命，偏好设置里的总开关保持不变。
+- **事件驱动监听、仅在面板可见时刷新倒计时**：直接基于 macOS 原生 `/usr/bin/caffeinate`，倒计时定时器仅在 Popover 展开可见时运行；目录跟随使用一次性的活动截止调度，实验性标准合盖模式在运行期间另有每 5 秒一次的重置定时器。[实测](docs/PERFORMANCE.md)：空闲 120 秒仅消耗 0.09–0.24 毫秒 CPU——和一个只画菜单栏图标、什么都不做的 App 处于同一量级。
+- **绑定断言生命周期**：GUI 和 CLI 的 `caffeinate` 通过 `-w <PID>` 绑定所属 SleepSkip 进程，正常结束或取消会释放；兼容合盖模式还依赖独立的 sentinel 和恢复脚本。
+- **事件驱动全局快捷键 (`⌃⌥S`) + 记忆直启**：通过系统原生 Carbon `RegisterEventHotKey` 注册全局开关快捷键 `⌃⌥S`（无需辅助功能隐私授权、没有快捷键轮询，可在偏好设置开关）；也可打开面板按一次 `Enter` 立即按上次配置启动。
+- **CLI 伴侣与精准 Hook（`sleepskip -- <cmd>` / `status` / `hook`）**：包裹终端命令并保留终端输入和子命令退出状态；支持读取运行中菜单栏应用状态的 `sleepskip status --json`（仅在状态跃迁时写快照、零常驻监听）与 `sleepskip stop` / `toggle` / `lock` 终端直控；还可接入 `sleepskip hook start|stop`（兼容 Claude Code `UserPromptSubmit` / `Stop` Hooks），实现「提问即防睡、答完即释放」，免等 5 分钟静默期。
 - **URL Scheme 快捷联动**：支持 `sleepskip://start` / `stop` / `toggle` / `lock`，轻松接入 Raycast、Alfred 与 macOS 快捷指令。
 - **两种纯正运行模式**：
-  - **后台运行**（`caffeinate -i`，默认）：阻止系统空闲睡眠、允许屏幕熄灭省电。支持记忆开关「启动即锁屏」与可选「合盖继续运行（背包模式）」。
-  - **屏幕常亮**（`caffeinate -di`）：保持系统与桌面窗口渲染活跃，适合 **Computer Use 桌面操控**、投屏演示与日志监看。（*跑 Computer Use 时建议手动把屏幕亮度调至最低以兼顾省电*）
-- **真正在背包里可用的「合盖模式」**：默认关闭、显式勾选并经系统 Touch ID / 管理员授权执行 `pmset -a disablesleep 1`，配合内核 `kqueue` + `trap` 守护机制，停止、超时或应用崩溃退出时自动恢复 `disablesleep 0`。
-- **零轮询电源安全保护**：基于 `IOKit.ps` `IOPSNotificationCreateRunLoopSource` 事件回调（默认低于 `10%` 且未充电时自动停止；可选「拔掉电源时自动停止」；并在启动前预检避免无效授权弹窗）。仅在定时到期或电源保护触发时发送原生系统通知。
+  - **后台运行**（`caffeinate -i`，默认）：阻止系统空闲睡眠、允许屏幕熄灭省电。支持记忆开关「启动即锁屏」与可选「合盖继续运行（实验性）」。
+  - **屏幕常亮**（`caffeinate -di`）：保持系统与桌面窗口渲染活跃，适合 **Computer Use 桌面操控**、投屏演示与日志监看。GUI 自动化仍需要已解锁的桌面会话，这个模式不会绕过系统锁屏和安全策略。（*跑 Computer Use 时建议手动把屏幕亮度调至最低以兼顾省电*）
+- **两种可选的「合盖模式」（实验性）**（默认关闭、显式勾选启用）：
+  - **标准模式（默认，无需授权）**：基于公开 SDK `kPMSetClamshellSleepState` 、事件驱动电源监听和每 5 秒一次的标志重置，无需管理员弹窗；已知系统限制为合盖状态下插回电源会在 6–9 秒后进入睡眠（详见 [合盖机制研究](docs/CLAMSHELL-RESEARCH.md)）。
+  - **兼容模式（可在偏好设置中切换）**：经系统 Touch ID / 管理员授权执行 `pmset -a disablesleep 1`，配合内核 `kqueue` + `trap` 守护机制，支持跨电源切换保持，并在停止、超时或应用退出时自动恢复 `disablesleep 0`。
+- **零轮询电源与自动温控安全网**：
+  - **电量与拔电保护**：基于 `IOKit.ps` `IOPSNotificationCreateRunLoopSource` 事件回调，内置默认 `10%` 低电量自动停止保护（可在设置折叠项「高级」中调整阈值或开启「拔掉电源时自动停止」）。
+  - **GUI 会话的高温截止**：纯事件监听 `ProcessInfo.thermalStateDidChangeNotification`，当设备达到严重过热（`Critical`）时自动释放防休眠并发送原生通知，不进行周期性温度轮询。它释放 SleepSkip 的防休眠保护，不会终止 Agent 任务，也不能保证设备立即降温；运行时仍应保持通风。
+- **极简图标、`sleepskip doctor` 与最近记录**：采用独立绘制的唤醒咖啡杯模版图标避免与系统「专注模式」撞脸；主设置页保持一屏极简，`最近守护记录` 收纳在「高级」折叠项内，系统断言诊断可通过 `sleepskip doctor` 在终端按需检查，平时零功耗、界面零噪音。
 
 ---
 
 ## CLI 伴侣与 URL 自动化
 
-建立一次软链接即可在终端全局使用：
+通过 Homebrew 安装后即已就绪；或在 **偏好设置** 中一键点击 **安装 `sleepskip` CLI**（自动链接至 `/opt/homebrew/bin` 或 `/usr/local/bin`），也可手动建立软链接：
 
 ```bash
 sudo ln -sf /Applications/SleepSkip.app/Contents/MacOS/SleepSkip /usr/local/bin/sleepskip
@@ -61,6 +72,20 @@ sleepskip --display --lock -- python agent.py
 
 # 跟随已在运行中的进程 PID
 sleepskip watch 12345 --lock
+
+# 供脚本 / tmux / Starship 读取当前状态、健康自检或遥控（零后台轮询开销）
+sleepskip status --json
+sleepskip doctor
+sleepskip toggle
+sleepskip stop
+
+# 一键安全读写 ~/.claude/settings.json（也可在偏好设置内一键点击连接）
+sleepskip hook install
+sleepskip hook uninstall
+
+# 手动发送时提供相同会话 ID；安装后的 Claude Hook 自动读取 stdin JSON 的 session_id
+sleepskip hook start --agent claude-code --session my-task
+sleepskip hook stop --agent claude-code --session my-task
 ```
 
 URL Scheme（适用 Raycast / Alfred / 快捷指令）：
@@ -74,7 +99,7 @@ URL Scheme（适用 Raycast / Alfred / 快捷指令）：
 
 ## 实测资源占用
 
-数据可用 `swift scripts/bench_idle.swift "$(pgrep -x SleepSkip)" 120` 复现；完整的测量方法与被否决的方案见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)。
+以下为 1.2.0 历史样本；当前候选可用 `swift scripts/bench_idle.swift "$(pgrep -x SleepSkip)" 120` 复现；完整的测量方法与被否决的方案见 [docs/PERFORMANCE.md](docs/PERFORMANCE.md)。
 
 | 状态 | 每 120 秒 CPU | 强制唤醒 |
 | :--- | ---: | ---: |
@@ -82,7 +107,9 @@ URL Scheme（适用 Raycast / Alfred / 快捷指令）：
 | 自动跟随开启、Agent 正在写入 | 180 秒 0.73 毫秒 | 12 次 |
 | 面板打开（1Hz 倒计时） | 60 秒 1.3 毫秒 | 约 60 次 |
 
-作为参照：一个**什么都不做、只画菜单栏图标**的空 AppKit 应用，空闲 120 秒也需要 0.035–0.142 毫秒。SleepSkip 处于同一区间——它自身的逻辑没有在系统开销之上增加任何可测量的负担。这也是为什么我们说的是「零定时器、零轮询」而不是「零唤醒」：任何菜单栏应用都无法诚实地承诺后者。
+这些是 1.2.0 的历史样本，不能代表当前全部运行模式。同期空菜单栏 App 的基线为每 120 秒 0.035–0.142 毫秒。普通待机不轮询进程或电源命令；标准合盖模式运行时另有每 5 秒一次的重置定时器，需要单独测量。
+
+CI 与发版流程均已接入自动化待机功耗门禁（`./scripts/bench_gate.sh`），收起面板空闲 20 秒内若 CPU 超过 `15.0 ms` 或强制唤醒超过 `25` 次将直接阻断发版。
 
 ---
 
@@ -125,7 +152,7 @@ chmod +x scripts/build_app.sh
 
 ## 架构红线
 
-1. 严禁 Popover 不可见时的后台定时器、状态栏每秒重绘或 `ps`/`pmset` 轮询。
+1. 严禁无用途的周期唤醒、面板不可见时每秒重绘状态栏，以及周期性 `ps`/`pmset` 轮询；标准合盖的重置定时器须限定于有效合盖会话并单独测量。
 2. 严禁静默或无自动恢复兜底地修改系统电源配置。
 3. 严禁使用模拟鼠标微动/虚拟按键绕过系统锁屏安全机制。
 4. 严禁调用 `killall caffeinate` 误杀其他应用断言。

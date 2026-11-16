@@ -1,182 +1,206 @@
 import CoreServices
 import Foundation
+import Darwin
 import SleepSkipCore
 
-/// Watches agent transcript directories with FSEvents and reports activity transitions.
-///
-/// Deliberately event-driven: no polling and no file reads. Only the fact that a `.jsonl` file
-/// under a watched directory changed is observed — never its contents.
-///
-/// One-shot timers are scheduled *relative to the last write* so the state machine is re-evaluated
-/// when an agent goes quiet. Without them a silent agent would hold the assertion forever, since
-/// no further FSEvents callback would arrive to notice the silence.
+/// Event-driven transcript metadata watcher. All stream, source and timer state belongs to
+/// eventQueue; callbacks retain a weak context rather than an unowned monitor pointer.
 final class AgentActivityMonitor {
+    private final class CallbackContext {
+        weak var monitor: AgentActivityMonitor?
+        init(_ monitor: AgentActivityMonitor) { self.monitor = monitor }
+    }
     private let tracker: AgentActivityTracker
     private let onStateChange: (AgentActivityState) -> Void
     private let onSessionLimitReached: () -> Void
-
+    private let onSourcesChanged: ([AgentSource]) -> Void
+    private let eventQueue = DispatchQueue(label: "io.github.laiyongqiang.SleepSkip.fsevents")
+    private let queueKey = DispatchSpecificKey<Bool>()
     private var stream: FSEventStreamRef?
-    private var watchedPaths: [String] = []
+    private var sources: [AgentSource] = []
+    private var availableSources: [AgentSource] = []
     private var lastReported: AgentActivityState = .inactive
     private var didReportLimit = false
-    /// One-shot timer armed after each write, fired once to evaluate the post-activity state.
     private var quietTimer: DispatchWorkItem?
+    private var generation = UUID()
+    private struct TranscriptVersion: Equatable {
+        let inode: UInt64
+        let size: Int64
+        let modifiedSeconds: Int
+        let modifiedNanoseconds: Int
+        init?(_ path: String) {
+            var metadata = stat()
+            guard Darwin.lstat(path, &metadata) == 0,
+                  metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else { return nil }
+            inode = UInt64(metadata.st_ino); size = metadata.st_size
+            modifiedSeconds = metadata.st_mtimespec.tv_sec
+            modifiedNanoseconds = metadata.st_mtimespec.tv_nsec
+        }
+    }
+    private var transcriptVersions: [String: TranscriptVersion] = [:]
 
-    /// Serial queue for FSEvents callbacks. Events mutate tracker state, which is lock-protected;
-    /// UI-facing callbacks are hopped to the main queue by the owner.
-    private let eventQueue = DispatchQueue(label: "io.github.laiyongqiang.SleepSkip.fsevents")
+    var isRunning: Bool { synchronized { stream != nil } }
 
-    /// Watched sources, so an event can be attributed without inspecting file contents.
-    private var activeSources: [AgentSource] = []
-
-    var isRunning: Bool { stream != nil }
-
-    init(
-        tracker: AgentActivityTracker,
-        onStateChange: @escaping (AgentActivityState) -> Void,
-        onSessionLimitReached: @escaping () -> Void = {}
-    ) {
+    init(tracker: AgentActivityTracker,
+         onStateChange: @escaping (AgentActivityState) -> Void,
+         onSessionLimitReached: @escaping () -> Void = {},
+         onSourcesChanged: @escaping ([AgentSource]) -> Void = { _ in }) {
         self.tracker = tracker
         self.onStateChange = onStateChange
         self.onSessionLimitReached = onSessionLimitReached
+        self.onSourcesChanged = onSourcesChanged
+        eventQueue.setSpecific(key: queueKey, value: true)
     }
 
-    deinit {
-        stop()
+    deinit { stop() }
+
+    private func synchronized<T>(_ body: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: queueKey) == true { return body() }
+        return eventQueue.sync(execute: body)
     }
 
-    /// Starts watching every source whose directory exists. Missing directories are skipped,
-    /// so a machine without Codex installed simply watches Claude Code.
+    private static func canonical(_ path: String) -> String {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            .standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
     func start(sources: [AgentSource] = AgentSource.defaults()) {
-        stop()
-
-        let fileManager = FileManager.default
-        let existing = sources.filter { fileManager.fileExists(atPath: $0.path) }
-        guard !existing.isEmpty else { return }
-
-        watchedPaths = existing.map(\.path)
-        activeSources = existing
-
-        var context = FSEventStreamContext(
-            version: 0,
-            info: Unmanaged.passUnretained(self).toOpaque(),
-            retain: nil,
-            release: nil,
-            copyDescription: nil
-        )
-
-        let callback: FSEventStreamCallback = { _, info, eventCount, eventPaths, _, _ in
-            guard let info else { return }
-            let monitor = Unmanaged<AgentActivityMonitor>.fromOpaque(info).takeUnretainedValue()
-            // kFSEventStreamCreateFlagUseCFTypes makes eventPaths a CFArray of CFString.
-            guard let array = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue() as? [String] else {
-                return
+        synchronized {
+            stopOnQueue()
+            self.sources = sources.map {
+                AgentSource(id: $0.id, displayName: $0.displayName, path: Self.canonical($0.path),
+                            fileSuffixes: $0.fileSuffixes, isCustom: $0.isCustom)
             }
-            monitor.handleEvents(paths: array, count: Int(eventCount))
+            // Watch an existing ancestor, even for absent transcript directories. Recursive
+            // events then discover installation/recreation without polling or panel interaction.
+            let roots = Set(self.sources.map { source -> String in
+                var parent = URL(fileURLWithPath: source.path).deletingLastPathComponent()
+                while !Self.isDirectory(parent.path), parent.path != "/" {
+                    parent.deleteLastPathComponent()
+                }
+                return parent.path
+            }).sorted()
+            guard !roots.isEmpty else { onSourcesChanged([]); return }
+            let callbackContext = CallbackContext(self)
+            var context = FSEventStreamContext(version: 0,
+                info: Unmanaged.passUnretained(callbackContext).toOpaque(),
+                retain: { pointer in
+                    guard let pointer else { return nil }
+                    _ = Unmanaged<CallbackContext>.fromOpaque(pointer).retain()
+                    return pointer
+                },
+                release: { pointer in
+                    guard let pointer else { return }
+                    Unmanaged<CallbackContext>.fromOpaque(pointer).release()
+                }, copyDescription: nil)
+            let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
+                guard let info,
+                      let monitor = Unmanaged<CallbackContext>.fromOpaque(info).takeUnretainedValue().monitor,
+                      let array = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] else { return }
+                monitor.handleEvents(paths: array, flags: flags, count: Int(count))
+            }
+            let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents
+                | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagUseCFTypes)
+            guard let created = FSEventStreamCreate(kCFAllocatorDefault, callback, &context,
+                roots as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3, flags) else {
+                onSourcesChanged([]); return
+            }
+            FSEventStreamSetDispatchQueue(created, eventQueue)
+            guard FSEventStreamStart(created) else {
+                FSEventStreamInvalidate(created); FSEventStreamRelease(created)
+                onSourcesChanged([]); return
+            }
+            stream = created
+            refreshSources()
         }
-
-        // File-level events so new session files are noticed as they appear. UseCFTypes is
-        // required for the callback above; NoDefer keeps latency low without a coalescing delay.
-        let flags = FSEventStreamCreateFlags(
-            kFSEventStreamCreateFlagFileEvents
-                | kFSEventStreamCreateFlagNoDefer
-                | kFSEventStreamCreateFlagUseCFTypes
-        )
-
-        guard let created = FSEventStreamCreate(
-            kCFAllocatorDefault,
-            callback,
-            &context,
-            watchedPaths as CFArray,
-            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.3,
-            flags
-        ) else {
-            return
-        }
-
-        FSEventStreamSetDispatchQueue(created, eventQueue)
-        guard FSEventStreamStart(created) else {
-            FSEventStreamInvalidate(created)
-            FSEventStreamRelease(created)
-            return
-        }
-        stream = created
     }
 
-    func stop() {
-        guard let stream else { return }
-        FSEventStreamStop(stream)
-        FSEventStreamInvalidate(stream)
-        FSEventStreamRelease(stream)
-        self.stream = nil
-        watchedPaths = []
-        activeSources = []
-        quietTimer?.cancel()
-        quietTimer = nil
-        lastReported = .inactive
-        didReportLimit = false
+    func stop() { synchronized { stopOnQueue() } }
+
+    private func stopOnQueue() {
+        generation = UUID()
+        quietTimer?.cancel(); quietTimer = nil
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+        }
+        stream = nil
+        sources = []; availableSources = []
+        transcriptVersions.removeAll()
+        lastReported = .inactive; didReportLimit = false
         tracker.reset()
     }
 
-    private func handleEvents(paths: [String], count: Int) {
+    private static func isDirectory(_ path: String) -> Bool {
+        var directory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &directory) && directory.boolValue
+    }
+
+    private func refreshSources() {
+        let updated = sources.filter { Self.isDirectory($0.path) }
+        guard updated != availableSources else { return }
+        availableSources = updated
+        onSourcesChanged(updated)
+    }
+
+    private func handleEvents(paths: [String], flags: UnsafePointer<FSEventStreamEventFlags>, count: Int) {
+        guard stream != nil else { return }
+        refreshSources()
         var matched = false
-        for path in paths.prefix(count) {
-            // Each source declares its own transcript extensions; DSH writes `.jsonl.zstd`.
-            guard let source = activeSources.first(where: { $0.matches(filePath: path) }) else { continue }
+        for (index, path) in paths.prefix(count).enumerated() {
+            let flag = flags[index]
+            let writes = FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemModified | kFSEventStreamEventFlagItemCloned | kFSEventStreamEventFlagItemRenamed)
+            guard flag & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRemoved) == 0,
+                  flag & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile) != 0,
+                  flag & writes != 0 else { continue }
+            // FSEvents paths already use filesystem paths. Reject unrelated parent-watch
+            // traffic before any per-file canonicalization or existence checks.
+            let lexicalPath = URL(fileURLWithPath: path).standardizedFileURL.path
+            guard availableSources.contains(where: { lexicalPath.hasPrefix($0.path == "/" ? "/" : $0.path + "/") }) else { continue }
+            let canonical = Self.canonical(path)
+            guard let source = availableSources.first(where: { $0.matches(filePath: canonical) }),
+                  let version = TranscriptVersion(canonical),
+                  transcriptVersions[canonical] != version else { continue }
+            // FSEvents may retain/coalesce write bits into a later metadata-only event. File
+            // identity, length and nanosecond mtime distinguish it without reading contents.
+            if transcriptVersions.count >= 16_384 { transcriptVersions.removeAll(keepingCapacity: true) }
+            transcriptVersions[canonical] = version
             tracker.recordActivity(sourceID: source.id)
             matched = true
         }
         guard matched else { return }
         scheduleQuietEvaluation()
-        reportCurrentState()
+        reportCurrentState(activity: true)
     }
 
-    /// Re-evaluates once the activity window lapses, and once more after the grace period ends.
-    /// Both are one-shot: nothing runs while the agent is quiet and already released.
     private func scheduleQuietEvaluation() {
+        scheduleEvaluation(after: tracker.currentPolicy.activityWindow + 0.02)
+    }
+
+    private func scheduleEvaluation(after delay: TimeInterval) {
         quietTimer?.cancel()
-        let policy = tracker.currentPolicy
+        let currentGeneration = generation
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, self.generation == currentGeneration, self.stream != nil else { return }
             self.reportCurrentState()
             if case .grace = self.tracker.evaluate() {
-                self.scheduleGraceExpiry(after: policy.gracePeriod)
+                self.scheduleEvaluation(after: self.tracker.currentPolicy.gracePeriod + 0.02)
             }
         }
         quietTimer = work
-        eventQueue.asyncAfter(deadline: .now() + policy.activityWindow, execute: work)
+        eventQueue.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private func scheduleGraceExpiry(after delay: TimeInterval) {
-        quietTimer?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.reportCurrentState()
+    private func reportCurrentState(activity: Bool = false) {
+        if tracker.autoSessionExceeded(), !didReportLimit {
+            didReportLimit = true
+            onSessionLimitReached()
+            // Keep the quiet timer: inactivity must eventually clear manager suppression.
         }
-        quietTimer = work
-        eventQueue.asyncAfter(deadline: .now() + delay + 0.5, execute: work)
-    }
-
-    private func reportCurrentState() {
-        if tracker.autoSessionExceeded() {
-            if !didReportLimit {
-                didReportLimit = true
-                onSessionLimitReached()
-            }
-            // Start a new window so a still-busy agent can be followed again after the release.
-            // Without this the tracker stays past its ceiling forever and auto-follow dies
-            // until the app restarts.
-            tracker.restartSessionWindow()
-            didReportLimit = false
-            lastReported = .inactive
-            quietTimer?.cancel()
-            quietTimer = nil
-            return
-        }
-
         let state = tracker.evaluate()
-        // Only report transitions the UI would actually render differently.
-        guard state.displayEquivalent != lastReported.displayEquivalent else { return }
+        if case .inactive = state { didReportLimit = false }
+        guard activity || state.displayEquivalent != lastReported.displayEquivalent else { return }
         lastReported = state
         onStateChange(state)
     }

@@ -10,8 +10,13 @@ public final class PreferencesStore {
         static let closedLidStrategy = "sleepskip.closedLidStrategy"
         static let batteryThreshold = "sleepskip.batteryThresholdPercent"
         static let stopOnUnplug = "sleepskip.stopOnUnplug"
+        static let thermalCutoff = "sleepskip.thermalCutoff"
         static let autoFollowAgents = "sleepskip.autoFollowAgents"
+        static let disabledAgentSources = "sleepskip.disabledAgentSources"
+        static let customAgentPaths = "sleepskip.customAgentPaths"
+        static let globalShortcutEnabled = "sleepskip.globalShortcutEnabled"
         static let language = "sleepskip.language"
+        static let history = "sleepskip.history"
         static let hasShownOnboarding = "sleepskip.hasShownOnboarding"
         static let hasSeenAutoFollowNotice = "sleepskip.hasSeenAutoFollowNotice"
         static let didMigrateFromSleepGuard = "sleepskip.didMigrateFromSleepGuard"
@@ -129,6 +134,14 @@ public final class PreferencesStore {
             stopOnUnplug = false
         }
 
+        let thermalCutoff: ThermalCutoff
+        if let raw = defaults.string(forKey: Keys.thermalCutoff),
+           let parsed = ThermalCutoff(rawValue: raw) {
+            thermalCutoff = parsed
+        } else {
+            thermalCutoff = .critical
+        }
+
         // On by default: the product promise is that the app works without being configured.
         // Anyone who has ever flipped the switch has a stored value and keeps their choice.
         let autoFollowAgents: Bool
@@ -136,6 +149,16 @@ public final class PreferencesStore {
             autoFollowAgents = defaults.bool(forKey: Keys.autoFollowAgents)
         } else {
             autoFollowAgents = true
+        }
+
+        let disabledAgentSources = defaults.stringArray(forKey: Keys.disabledAgentSources) ?? []
+        let customAgentPaths = defaults.stringArray(forKey: Keys.customAgentPaths) ?? []
+
+        let globalShortcutEnabled: Bool
+        if defaults.object(forKey: Keys.globalShortcutEnabled) != nil {
+            globalShortcutEnabled = defaults.bool(forKey: Keys.globalShortcutEnabled)
+        } else {
+            globalShortcutEnabled = true
         }
 
         let langRaw = defaults.string(forKey: Keys.language) ?? AppLanguage.system.rawValue
@@ -150,7 +173,11 @@ public final class PreferencesStore {
             closedLidStrategy: closedLidStrategy,
             batteryThresholdPercent: batteryThreshold,
             stopOnUnplug: stopOnUnplug,
+            thermalCutoff: thermalCutoff,
             autoFollowAgents: autoFollowAgents,
+            disabledAgentSourceIDs: disabledAgentSources,
+            customAgentPaths: customAgentPaths,
+            globalShortcutEnabled: globalShortcutEnabled,
             language: language
         )
     }
@@ -164,7 +191,23 @@ public final class PreferencesStore {
         defaults.set(config.closedLidStrategy.rawValue, forKey: Keys.closedLidStrategy)
         defaults.set(config.batteryThresholdPercent, forKey: Keys.batteryThreshold)
         defaults.set(config.stopOnUnplug, forKey: Keys.stopOnUnplug)
+        defaults.set(config.thermalCutoff.rawValue, forKey: Keys.thermalCutoff)
         defaults.set(config.autoFollowAgents, forKey: Keys.autoFollowAgents)
+        defaults.set(config.disabledAgentSourceIDs, forKey: Keys.disabledAgentSources)
+        defaults.set(config.customAgentPaths, forKey: Keys.customAgentPaths)
+        defaults.set(config.globalShortcutEnabled, forKey: Keys.globalShortcutEnabled)
         defaults.set(config.language.rawValue, forKey: Keys.language)
+    }
+
+    public func loadHistory() -> [SessionHistoryEntry] {
+        guard let data = defaults.data(forKey: Keys.history) else { return [] }
+        return (try? JSONDecoder().decode([SessionHistoryEntry].self, from: data)) ?? []
+    }
+
+    public func saveHistory(_ entries: [SessionHistoryEntry]) {
+        let capped = Array(entries.prefix(10))
+        if let data = try? JSONEncoder().encode(capped) {
+            defaults.set(data, forKey: Keys.history)
+        }
     }
 }
