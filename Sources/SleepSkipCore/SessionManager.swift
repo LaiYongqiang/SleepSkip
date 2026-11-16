@@ -1021,6 +1021,10 @@ public final class SessionManager: ObservableObject {
                 unprivilegedLidGuard?.disable()
             }
             stopIdleSafetyWatches()
+            // Authorization may already have completed. Publish the protection that actually
+            // remains, including an older session retained when this replacement is rejected.
+            syncAutoFollowSourceKind()
+            notifyStateTransition()
             return
         }
         let timeoutSec = CommandBuilder.timeoutSeconds(forMinutes: minutes)
@@ -1036,6 +1040,8 @@ public final class SessionManager: ObservableObject {
             }
             stopIdleSafetyWatches()
             errorMessage = error.localizedDescription
+            syncAutoFollowSourceKind()
+            notifyStateTransition()
             return
         }
 

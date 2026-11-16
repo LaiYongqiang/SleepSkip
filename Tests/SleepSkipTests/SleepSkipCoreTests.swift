@@ -1682,6 +1682,66 @@ struct SleepSkipCoreTests {
         #expect(en.returnToAutoFollowButton(dropsClosedLid: true).contains("lid"))
     }
 
+    @Test func authorizedLaunchFailurePublishesActualHookProtection() throws {
+        enum ExistingSession { case none, manual, autoFollow }
+        enum Failure { case spawn, battery, thermal }
+        for existing in [ExistingSession.none, .manual, .autoFollow] {
+            for failure in [Failure.spawn, .battery, .thermal] {
+                let caf = MockCaffeinateRunner()
+                let bag = MockBackpackGuard()
+                let power = MockPowerMonitor()
+                let thermal = MockThermalMonitor()
+                let locker = MockScreenLocker()
+                let (manager, defaults, suite) = try makeManager(
+                    caf: caf, bag: bag, power: power, thermal: thermal, locker: locker)
+                defer { defaults.removePersistentDomain(forName: suite) }
+                manager.setAutoFollowEnabled(false)
+                switch existing {
+                case .none: break
+                case .manual: manager.startConfiguredSession()
+                case .autoFollow: manager.handleHookStart(sessionID: "existing", agent: "claude-code")
+                }
+                let wasRunning = manager.isRunning
+                let oldDeadline = manager.endDate
+                let oldStarts = caf.startCount
+                bag.deferEnableCompletion = true
+                manager.setClosedLidStrategy(.privileged)
+                manager.setAllowClosedLid(true)
+                manager.setLockOnStart(true)
+                manager.startConfiguredSession()
+                manager.handleHookStart(sessionID: "pending", agent: "claude-code")
+                #expect(manager.isAuthorizing)
+                var publishedStatus: HookProtectionStatus?
+                manager.onStateChange = { _, _ in publishedStatus = manager.hookProtectionStatus }
+
+                switch failure {
+                case .spawn: caf.shouldThrowOnStart = true
+                case .battery: power.snapshot = PowerSnapshot(onBattery: true, percentage: 1)
+                case .thermal: thermal.overheated = true
+                }
+                bag.finishPendingEnable()
+
+                let expected: HookProtectionStatus
+                switch existing {
+                case .none: expected = .paused(limitReached: false)
+                case .manual: expected = .standbyBehindManual
+                case .autoFollow: expected = .holding
+                }
+                #expect(!manager.isAuthorizing)
+                #expect(manager.pendingAuthorizationLaunch == nil)
+                #expect(manager.errorMessage != nil)
+                #expect(manager.hookProtectionStatus == expected)
+                #expect(publishedStatus == expected)
+                #expect(manager.isRunning == wasRunning)
+                #expect(manager.endDate == oldDeadline)
+                #expect(caf.startCount == oldStarts)
+                #expect(caf.isActive == wasRunning)
+                #expect(!bag.enabled)
+                #expect(locker.lockCount == 0)
+            }
+        }
+    }
+
     @Test func hookProtectionStatusDistinguishesPendingAuthorizationWithAndWithoutExistingSession() throws {
         enum AuthOutcome { case succeed, fail, cancel }
 
