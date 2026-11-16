@@ -281,7 +281,7 @@ struct SleepSkipCoreTests {
         let initial = store.load()
         #expect(initial.mode == .background)
         #expect(initial.durationMinutes == 240)
-        #expect(initial.lockOnStart == true)
+        #expect(initial.lockOnStart == false)
         #expect(initial.allowClosedLid == false)
         #expect(initial.stopOnUnplug == false)
         #expect(initial.autoFollowAgents == true)
@@ -291,7 +291,7 @@ struct SleepSkipCoreTests {
         updated.mode = .keepDisplay
         updated.durationMinutes = 90
         updated.customMinutes = 90
-        updated.lockOnStart = false
+        updated.lockOnStart = true
         updated.allowClosedLid = true
         updated.stopOnUnplug = true
         updated.autoFollowAgents = false
@@ -299,6 +299,13 @@ struct SleepSkipCoreTests {
         store.save(updated)
 
         #expect(store.load() == updated)
+
+        // Existing installs without an explicit lockOnStart key preserve legacy true behavior.
+        let legacySuite = "io.github.laiyongqiang.SleepSkip.legacyLock.\(UUID().uuidString)"
+        let legacyDefaults = try #require(UserDefaults(suiteName: legacySuite))
+        defer { legacyDefaults.removePersistentDomain(forName: legacySuite) }
+        legacyDefaults.set("background", forKey: "sleepskip.mode")
+        #expect(PreferencesStore(defaults: legacyDefaults).load().lockOnStart == true)
     }
 
     @Test func sessionManagerLifecycleAndPreFlightGuards() throws {
@@ -502,30 +509,149 @@ struct SleepSkipCoreTests {
         #expect(caf.stopCount == 1)
     }
 
-    @Test func manualStopAndModePromotionDuringAutoFollow() throws {
+    @Test func modeSwitchDuringAutoFollowPreservesLifecycleAcrossSavedPresets() throws {
+        for savedDuration in [1.0, 240.0, 0.0] {
+            var now = Date(timeIntervalSince1970: 1_700_000_000)
+            let caf = MockCaffeinateRunner()
+            let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+            defer { defaults.removePersistentDomain(forName: suite) }
+
+            manager.selectMode(.background)
+            manager.selectDuration(savedDuration)
+            manager.setAutoFollowEnabled(true)
+            manager.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: now))
+            #expect(manager.isFollowingAgents)
+            let autoEnd = manager.endDate
+
+            now = now.addingTimeInterval(20)
+            manager.switchRunningMode(to: .keepDisplay)
+            #expect(manager.isRunning)
+            #expect(manager.isFollowingAgents, "display mode switch must keep auto-follow lifecycle")
+            #expect(manager.activeMode == .keepDisplay)
+            #expect(!manager.isIndefinite, "indefinite manual preset must not leak into auto-follow")
+            #expect(manager.endDate == autoEnd, "2h ceiling must be preserved")
+            #expect(manager.config.mode == .background, "saved manual mode must stay unchanged")
+            #expect(caf.lastTimeout == 7210)
+
+            manager.switchRunningMode(to: .background)
+            #expect(manager.isFollowingAgents)
+            #expect(manager.activeMode == .background)
+            #expect(manager.endDate == autoEnd)
+
+            manager.handleAgentActivity(.inactive)
+            #expect(!manager.isRunning, "auto-follow session must still release on quiet after mode toggle")
+            #expect(!manager.isFollowingAgents)
+        }
+    }
+
+    @Test func explicitManualPromotionAndReturnToAutoFollow() throws {
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
         let caf = MockCaffeinateRunner()
-        let (manager, defaults, suite) = try makeManager(caf: caf)
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
         defer { defaults.removePersistentDomain(forName: suite) }
 
         manager.setAutoFollowEnabled(true)
-        manager.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: Date()))
+        manager.selectDuration(1)
+        manager.agentTracker.recordActivity(sourceID: "claude-code")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
         #expect(manager.isFollowingAgents)
+        #expect(manager.remainingSeconds == 7200)
+
+        manager.promoteAutoFollowToManual()
+        #expect(manager.isRunning)
+        #expect(!manager.isFollowingAgents)
+        #expect(manager.remainingSeconds == 60)
+        #expect(manager.canSwitchToAutoFollow)
+
+        manager.switchManualToAutoFollow()
+        #expect(manager.isFollowingAgents)
+        #expect(manager.remainingSeconds == 7200)
+
+        manager.promoteAutoFollowToManual()
+        now = now.addingTimeInterval(400)
+        manager.handleAgentActivity(.inactive)
+        #expect(manager.isRunning, "explicit manual session must survive agents going quiet")
+        #expect(!manager.canSwitchToAutoFollow)
+    }
+
+    @Test func pauseResumeAndCancelAuthorizationStates() throws {
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let bag = MockBackpackGuard()
+        let (manager, defaults, suite) = try makeManager(caf: caf, bag: bag, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Manual stop while active surfaces paused state and resumeAutoFollow restores immediately.
+        manager.setAutoFollowEnabled(true)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(manager.isFollowingAgents)
+        #expect(manager.activeAutoFollowSourceKind == .directoryOnly)
 
         manager.stopSession(reason: .manual)
         #expect(!manager.isRunning)
-        #expect(manager.isAutoFollowEnabled, "manual stop must preserve auto-follow setting")
+        #expect(manager.autoFollowSuppressed)
+        #expect(!manager.autoFollowLimitReached)
 
-        manager.handleAgentActivity(.inactive)
-        manager.handleAgentActivity(.active(agents: ["claude-code"], lastActivity: Date()))
+        manager.resumeAutoFollow()
         #expect(manager.isFollowingAgents)
+        #expect(!manager.autoFollowSuppressed)
 
-        manager.switchRunningMode(to: .keepDisplay)
-        #expect(manager.isRunning)
-        #expect(!manager.isFollowingAgents)
-        #expect(manager.activeMode == .keepDisplay)
+        // 2h limit sets paused+limit state, and resumeAutoFollow restarts with a fresh 2h cap.
+        manager.handleAutoFollowLimitReached()
+        #expect(!manager.isRunning)
+        #expect(manager.autoFollowSuppressed)
+        #expect(manager.autoFollowLimitReached)
 
+        now = now.addingTimeInterval(10)
+        manager.resumeAutoFollow()
+        #expect(manager.isFollowingAgents)
+        #expect(!manager.autoFollowSuppressed)
+        #expect(!manager.autoFollowLimitReached)
+        #expect(manager.remainingSeconds == 7200)
+
+        // Cancelling pending admin authorization via cancelAuthorization drops pending state and ignores late success.
+        manager.stopSession(reason: .manual)
         manager.handleAgentActivity(.inactive)
-        #expect(manager.isRunning, "promoted manual session must survive agents going quiet")
+        bag.deferEnableCompletion = true
+        manager.setClosedLidStrategy(.privileged)
+        manager.setAllowClosedLid(true)
+        manager.startConfiguredSession()
+        #expect(manager.isAuthorizing)
+        #expect(manager.pendingAuthorizationLaunch != nil)
+
+        manager.cancelAuthorization()
+        #expect(!manager.isAuthorizing)
+        #expect(manager.pendingAuthorizationLaunch == nil)
+        #expect(!manager.autoFollowSuppressed)
+        let startsBeforeLateAuth = caf.startCount
+        bag.finishPendingEnable()
+        #expect(!manager.isRunning)
+        #expect(caf.startCount == startsBeforeLateAuth)
+        #expect(!bag.enabled)
+    }
+
+    @Test func l10nHonestBoundaryCopyAndSourceDistinction() {
+        let zh = L10n(language: .zhHans)
+        let en = L10n(language: .en)
+
+        var cfg = SessionConfig(mode: .background, durationMinutes: 60, lockOnStart: false, allowClosedLid: false)
+        #expect(!zh.launchConfigSummary(cfg).contains("上次配置"))
+        #expect(!en.launchConfigSummary(cfg).contains("Last:"))
+        #expect(zh.startButtonTitle(for: cfg) == "开始保持唤醒 (⏎)")
+        cfg.lockOnStart = true
+        #expect(zh.startButtonTitle(for: cfg) == "开始并锁屏 (⏎)")
+        #expect(en.startButtonTitle(for: cfg) == "Start & Lock Screen (⏎)")
+        cfg.allowClosedLid = true
+        cfg.closedLidStrategy = .privileged
+        #expect(zh.startButtonTitle(for: cfg).contains("授权"))
+        #expect(en.startButtonTitle(for: cfg).contains("Authorize"))
+
+        #expect(zh.autoFollowCeilingLabel("12:00", sourceKind: .hookOnly) != zh.autoFollowCeilingLabel("12:00", sourceKind: .directoryOnly))
+        #expect(!zh.autoFollowPolicySummary(.hookOnly).contains("停笔 5 分钟"))
+        #expect(!en.autoFollowPolicySummary(.hookOnly).contains("5m idle"))
+        #expect(zh.closedLidInlineNote(strategy: .unprivileged).contains("6–9"))
+        #expect(en.closedLidInlineNote(strategy: .unprivileged).contains("6–9"))
     }
 
     @Test func autoFollowDoesNotOverrideAManualSession() throws {
@@ -1401,6 +1527,347 @@ struct SleepSkipCoreTests {
         #expect(!manager.isRunning)
         #expect(power.eventHandler == nil)
         #expect(thermal.triggerHandler == nil)
+    }
+
+    @Test func closedLidManualToAutoFollowRequiresConfirmationAndPreservesProtectionOnCancelOrFailure() throws {
+        final class MockLidGuard: ClosedLidGuarding {
+            var isEngaged = false
+            var disableCalls = 0
+            func enable(completion: @escaping (Result<Void, Error>) -> Void) {
+                isEngaged = true
+                completion(.success(()))
+            }
+            func disable() {
+                disableCalls += 1
+                isEngaged = false
+            }
+        }
+
+        // 1. Ordinary manual session switches immediately without confirmation.
+        do {
+            let caf = MockCaffeinateRunner()
+            let (manager, defaults, suite) = try makeManager(caf: caf)
+            defer { defaults.removePersistentDomain(forName: suite) }
+            manager.setAutoFollowEnabled(true)
+            manager.agentTracker.recordActivity(sourceID: "codex")
+            manager.handleAgentActivity(manager.agentTracker.evaluate())
+            manager.promoteAutoFollowToManual()
+            #expect(!manager.activeClosedLid)
+            manager.requestSwitchManualToAutoFollow()
+            #expect(!manager.pendingAutoFollowSwitchConfirmation)
+            #expect(manager.isFollowingAgents)
+        }
+
+        // 2. Standard (unprivileged) and Compatibility (privileged) closed-lid sessions require confirmation
+        // and preserve lid protection on cancel or caffeinate failure.
+        for strategy in [ClosedLidStrategy.unprivileged, ClosedLidStrategy.privileged] {
+            let caf = MockCaffeinateRunner()
+            let bag = MockBackpackGuard()
+            let lid = MockLidGuard()
+            let suite = "ss.lidswitch.\(strategy.rawValue).\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let manager = SessionManager(
+                store: PreferencesStore(defaults: defaults),
+                caffeinateRunner: caf,
+                backpackGuard: bag,
+                unprivilegedLidGuard: lid,
+                powerMonitor: MockPowerMonitor(),
+                screenLocker: MockScreenLocker(),
+                notifier: MockNotifier(),
+                loginItem: MockLoginItem(),
+                checkStaleSleepOnInit: false
+            )
+            manager.setAutoFollowEnabled(true)
+            manager.agentTracker.recordActivity(sourceID: "codex")
+            manager.setClosedLidStrategy(strategy)
+            manager.setAllowClosedLid(true)
+            manager.startConfiguredSession()
+            #expect(manager.isRunning && manager.activeClosedLid)
+            #expect(manager.canSwitchToAutoFollow)
+            let isProtected: () -> Bool = { strategy == .unprivileged ? lid.isEngaged : bag.enabled }
+            #expect(isProtected())
+
+            // Request stages confirmation without dropping protection.
+            manager.requestSwitchManualToAutoFollow()
+            #expect(manager.pendingAutoFollowSwitchConfirmation)
+            #expect(manager.activeClosedLid)
+            #expect(!manager.isFollowingAgents)
+            #expect(isProtected())
+
+            // Cancel preserves active closed-lid guard.
+            manager.cancelSwitchToAutoFollow()
+            #expect(!manager.pendingAutoFollowSwitchConfirmation)
+            #expect(manager.activeClosedLid)
+            #expect(isProtected())
+
+            // Failure when starting auto-follow caffeinate preserves active closed-lid guard.
+            manager.requestSwitchManualToAutoFollow()
+            caf.shouldThrowOnStart = true
+            manager.switchManualToAutoFollow()
+            #expect(manager.errorMessage != nil)
+            #expect(manager.activeClosedLid)
+            #expect(!manager.isFollowingAgents)
+            #expect(isProtected())
+
+            // Confirmed switch succeeds and cleanly disables lid protection.
+            caf.shouldThrowOnStart = false
+            manager.requestSwitchManualToAutoFollow()
+            manager.switchManualToAutoFollow()
+            #expect(manager.isFollowingAgents)
+            #expect(!manager.activeClosedLid)
+            #expect(!manager.pendingAutoFollowSwitchConfirmation)
+            #expect(!isProtected())
+        }
+    }
+
+    @Test func hookProtectionStatusTracksOwnershipAcrossPauseLimitManualAndMultiSource() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(manager.hookProtectionStatus == .none)
+
+        // Hook-only active -> holding
+        manager.setAutoFollowEnabled(false)
+        manager.handleHookStart(sessionID: "h1", agent: "claude-code")
+        #expect(manager.hasActiveHookSessions)
+        #expect(manager.hookProtectionStatus == .holding)
+
+        // Manual stop -> lease stays for recovery, status accurately reports paused
+        manager.stopSession(reason: .manual)
+        #expect(manager.hasActiveHookSessions)
+        #expect(manager.autoFollowSuppressed)
+        #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+
+        // Resume -> holding again
+        manager.resumeAutoFollow()
+        #expect(manager.hookProtectionStatus == .holding)
+
+        // 2h limit -> paused with limitReached = true
+        manager.handleAutoFollowLimitReached()
+        #expect(manager.hasActiveHookSessions)
+        #expect(manager.hookProtectionStatus == .paused(limitReached: true))
+
+        // Resume -> holding; then manual start takes ownership -> standbyBehindManual
+        manager.resumeAutoFollow()
+        #expect(manager.hookProtectionStatus == .holding)
+        manager.startConfiguredSession()
+        #expect(manager.isRunning && !manager.isFollowingAgents)
+        #expect(manager.hookProtectionStatus == .standbyBehindManual)
+
+        // Stop manual -> resumes paused state while hook lease still exists; hookStop clears to .none
+        manager.stopSession(reason: .manual)
+        #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+        manager.handleHookStop(sessionID: "h1", agent: "claude-code")
+        #expect(manager.hookProtectionStatus == .none)
+
+        // Multi-source (directory + hook): hookStop drops hook status to .none while directory keeps auto-follow alive
+        manager.setAutoFollowEnabled(true)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        manager.handleHookStart(sessionID: "h2", agent: "claude-code")
+        #expect(manager.hookProtectionStatus == .holding)
+        manager.handleHookStop(sessionID: "h2", agent: "claude-code")
+        #expect(manager.hookProtectionStatus == .none)
+        #expect(manager.isFollowingAgents && manager.isRunning)
+
+        // Copy check: paused badge must never say Holding / 保持中
+        let zh = L10n(language: .zhHans)
+        let en = L10n(language: .en)
+        #expect(zh.claudeHookStatusBadge(.paused(limitReached: false)) == "已暂停")
+        #expect(en.claudeHookStatusBadge(.paused(limitReached: false)) == "Paused")
+        #expect(zh.returnToAutoFollowButton(dropsClosedLid: true).contains("合盖"))
+        #expect(en.returnToAutoFollowButton(dropsClosedLid: true).contains("lid"))
+    }
+
+    @Test func authorizedLaunchFailurePublishesActualHookProtection() throws {
+        enum ExistingSession { case none, manual, autoFollow }
+        enum Failure { case spawn, battery, thermal }
+        for existing in [ExistingSession.none, .manual, .autoFollow] {
+            for failure in [Failure.spawn, .battery, .thermal] {
+                let caf = MockCaffeinateRunner()
+                let bag = MockBackpackGuard()
+                let power = MockPowerMonitor()
+                let thermal = MockThermalMonitor()
+                let locker = MockScreenLocker()
+                let (manager, defaults, suite) = try makeManager(
+                    caf: caf, bag: bag, power: power, thermal: thermal, locker: locker)
+                defer { defaults.removePersistentDomain(forName: suite) }
+                manager.setAutoFollowEnabled(false)
+                switch existing {
+                case .none: break
+                case .manual: manager.startConfiguredSession()
+                case .autoFollow: manager.handleHookStart(sessionID: "existing", agent: "claude-code")
+                }
+                let wasRunning = manager.isRunning
+                let oldDeadline = manager.endDate
+                let oldStarts = caf.startCount
+                bag.deferEnableCompletion = true
+                manager.setClosedLidStrategy(.privileged)
+                manager.setAllowClosedLid(true)
+                manager.setLockOnStart(true)
+                manager.startConfiguredSession()
+                manager.handleHookStart(sessionID: "pending", agent: "claude-code")
+                #expect(manager.isAuthorizing)
+                var publishedStatus: HookProtectionStatus?
+                manager.onStateChange = { _, _ in publishedStatus = manager.hookProtectionStatus }
+
+                switch failure {
+                case .spawn: caf.shouldThrowOnStart = true
+                case .battery: power.snapshot = PowerSnapshot(onBattery: true, percentage: 1)
+                case .thermal: thermal.overheated = true
+                }
+                bag.finishPendingEnable()
+
+                let expected: HookProtectionStatus
+                switch existing {
+                case .none: expected = .paused(limitReached: false)
+                case .manual: expected = .standbyBehindManual
+                case .autoFollow: expected = .holding
+                }
+                #expect(!manager.isAuthorizing)
+                #expect(manager.pendingAuthorizationLaunch == nil)
+                #expect(manager.errorMessage != nil)
+                #expect(manager.hookProtectionStatus == expected)
+                #expect(publishedStatus == expected)
+                #expect(manager.isRunning == wasRunning)
+                #expect(manager.endDate == oldDeadline)
+                #expect(caf.startCount == oldStarts)
+                #expect(caf.isActive == wasRunning)
+                #expect(!bag.enabled)
+                #expect(locker.lockCount == 0)
+            }
+        }
+    }
+
+    @Test func hookProtectionStatusDistinguishesPendingAuthorizationWithAndWithoutExistingSession() throws {
+        enum AuthOutcome { case succeed, fail, cancel }
+
+        // 1. No existing session while authorizing: must report not holding, never manual protection.
+        for outcome in [AuthOutcome.succeed, .fail, .cancel] {
+            let bag = MockBackpackGuard()
+            bag.deferEnableCompletion = true
+            let (manager, defaults, suite) = try makeManager(caf: MockCaffeinateRunner(), bag: bag)
+            defer { defaults.removePersistentDomain(forName: suite) }
+
+            manager.setAutoFollowEnabled(false)
+            manager.setClosedLidStrategy(.privileged)
+            manager.setAllowClosedLid(true)
+            manager.startConfiguredSession()
+            #expect(manager.isAuthorizing && !manager.isRunning)
+
+            manager.handleHookStart(sessionID: "pending-hook", agent: "claude-code")
+            #expect(manager.hookProtectionStatus == .waitingForAuthorization(existingProtection: nil))
+
+            switch outcome {
+            case .succeed:
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && !manager.isAuthorizing)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            case .fail:
+                bag.shouldFailEnable = true
+                bag.finishPendingEnable()
+                #expect(!manager.isRunning && !manager.isAuthorizing)
+                #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+            case .cancel:
+                manager.cancelAuthorization()
+                #expect(!manager.isRunning && !manager.isAuthorizing)
+                #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+                bag.finishPendingEnable()
+                #expect(!manager.isRunning)
+                #expect(manager.hookProtectionStatus == .paused(limitReached: false))
+            }
+        }
+
+        // 2. Existing manual session running while replacement authorization is pending.
+        for outcome in [AuthOutcome.succeed, .fail, .cancel] {
+            let bag = MockBackpackGuard()
+            let (manager, defaults, suite) = try makeManager(caf: MockCaffeinateRunner(), bag: bag)
+            defer { defaults.removePersistentDomain(forName: suite) }
+
+            manager.setAutoFollowEnabled(false)
+            manager.startConfiguredSession()
+            #expect(manager.isRunning && !manager.isFollowingAgents)
+
+            bag.deferEnableCompletion = true
+            manager.setClosedLidStrategy(.privileged)
+            manager.setAllowClosedLid(true)
+            manager.startConfiguredSession()
+            manager.handleHookStart(sessionID: "manual-replacement-hook", agent: "claude-code")
+            #expect(manager.hookProtectionStatus == .waitingForAuthorization(existingProtection: .manual))
+
+            switch outcome {
+            case .succeed:
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && !manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            case .fail:
+                bag.shouldFailEnable = true
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && !manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            case .cancel:
+                manager.cancelAuthorization()
+                #expect(manager.isRunning && !manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            }
+        }
+
+        // 3. Existing auto-follow session running while replacement authorization is pending.
+        for outcome in [AuthOutcome.succeed, .fail, .cancel] {
+            let bag = MockBackpackGuard()
+            let (manager, defaults, suite) = try makeManager(caf: MockCaffeinateRunner(), bag: bag)
+            defer { defaults.removePersistentDomain(forName: suite) }
+
+            manager.setAutoFollowEnabled(false)
+            manager.handleHookStart(sessionID: "auto-replacement-hook", agent: "claude-code")
+            #expect(manager.isRunning && manager.isFollowingAgents)
+
+            bag.deferEnableCompletion = true
+            manager.setClosedLidStrategy(.privileged)
+            manager.setAllowClosedLid(true)
+            manager.startConfiguredSession()
+            #expect(manager.hookProtectionStatus == .waitingForAuthorization(existingProtection: .autoFollow))
+
+            switch outcome {
+            case .succeed:
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && !manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .standbyBehindManual)
+            case .fail:
+                bag.shouldFailEnable = true
+                bag.finishPendingEnable()
+                #expect(manager.isRunning && manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .holding)
+            case .cancel:
+                manager.cancelAuthorization()
+                #expect(manager.isRunning && manager.isFollowingAgents)
+                #expect(manager.hookProtectionStatus == .holding)
+            }
+        }
+
+        // 4. R1 & R2 localized copy verification (ZH & EN).
+        let zh = L10n(language: .zhHans)
+        let en = L10n(language: .en)
+        let noSessionDetailZh = try #require(zh.claudeHookStatusDetail(.waitingForAuthorization(existingProtection: nil)))
+        let noSessionDetailEn = try #require(en.claudeHookStatusDetail(.waitingForAuthorization(existingProtection: nil)))
+        #expect(noSessionDetailZh.contains("尚未保持唤醒"))
+        #expect(!noSessionDetailZh.contains("由手动会话保持"))
+        #expect(noSessionDetailEn.contains("not holding wake protection yet"))
+        #expect(!noSessionDetailEn.contains("manual protection currently owns"))
+
+        let manualExistingDetailZh = try #require(zh.claudeHookStatusDetail(.waitingForAuthorization(existingProtection: .manual)))
+        let manualExistingDetailEn = try #require(en.claudeHookStatusDetail(.waitingForAuthorization(existingProtection: .manual)))
+        #expect(manualExistingDetailZh.contains("原有手动会话保持唤醒"))
+        #expect(manualExistingDetailEn.contains("existing manual session holds wake protection"))
+
+        let manualStandbyZh = try #require(zh.claudeHookStatusDetail(.standbyBehindManual))
+        let manualStandbyEn = try #require(en.claudeHookStatusDetail(.standbyBehindManual))
+        #expect(!manualStandbyZh.contains("将接管"))
+        #expect(manualStandbyZh.contains("暂停规则"))
+        #expect(manualStandbyEn.contains("manual stop pauses following"))
     }
 
 }

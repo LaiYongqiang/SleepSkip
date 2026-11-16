@@ -45,7 +45,7 @@ struct ScreenshotRenderer {
         let hosting = NSHostingView(rootView: wrapped)
         hosting.appearance = NSAppearance(named: appearance)
         let fitting = hosting.fittingSize
-        hosting.frame = NSRect(origin: .zero, size: NSSize(width: 356, height: fitting.height))
+        hosting.frame = NSRect(origin: .zero, size: NSSize(width: 372, height: fitting.height))
         hosting.layoutSubtreeIfNeeded()
 
         if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {

@@ -77,6 +77,45 @@ public enum ThermalCutoff: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
+public enum AutoFollowSourceKind: Equatable, Sendable {
+    case none
+    case hookOnly
+    case directoryOnly
+    case both
+}
+
+public enum ExistingProtectionKind: Equatable, Sendable {
+    case manual
+    case autoFollow
+}
+
+public enum HookProtectionStatus: Equatable, Sendable {
+    case none
+    case holding
+    case paused(limitReached: Bool)
+    case standbyBehindManual
+    case waitingForAuthorization(existingProtection: ExistingProtectionKind?)
+}
+
+public struct PendingAuthorizationLaunch: Equatable, Sendable {
+    public let mode: GuardMode
+    public let durationMinutes: Double
+    public let lockOnStart: Bool
+    public let closedLidStrategy: ClosedLidStrategy
+
+    public init(
+        mode: GuardMode,
+        durationMinutes: Double,
+        lockOnStart: Bool,
+        closedLidStrategy: ClosedLidStrategy
+    ) {
+        self.mode = mode
+        self.durationMinutes = durationMinutes
+        self.lockOnStart = lockOnStart
+        self.closedLidStrategy = closedLidStrategy
+    }
+}
+
 public enum SessionTrigger: String, Codable, Sendable {
     case manual
     case autoFollow
@@ -134,7 +173,7 @@ public struct SessionConfig: Equatable, Sendable {
         mode: GuardMode = .background,
         durationMinutes: Double = 240,
         customMinutes: Double = 90,
-        lockOnStart: Bool = true,
+        lockOnStart: Bool = false,
         allowClosedLid: Bool = false,
         closedLidStrategy: ClosedLidStrategy = .unprivileged,
         batteryThresholdPercent: Int = 10,
