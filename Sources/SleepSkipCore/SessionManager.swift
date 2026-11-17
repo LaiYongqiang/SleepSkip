@@ -1269,6 +1269,14 @@ public final class SessionManager: ObservableObject {
         syncAutoFollowSourceKind()
         refreshDisplayTick()
         notifyStateTransition()
+
+        // launchCaffeinate locks the screen after a lockOnStart manual start. Promotion produces
+        // the same manual session, so the non-privileged path must honor the same promise — the
+        // privileged branch already does via startPrivilegedLidGuard.
+        if config.effectiveLockOnStart {
+            onRequestClosePopover?()
+            screenLocker.lockScreen()
+        }
     }
 
     /// Requests switching a running manual session back to auto-follow. When closed-lid protection

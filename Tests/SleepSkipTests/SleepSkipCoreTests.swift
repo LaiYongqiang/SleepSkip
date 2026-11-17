@@ -574,6 +574,30 @@ struct SleepSkipCoreTests {
         #expect(!manager.canSwitchToAutoFollow)
     }
 
+    @Test func promotingToManualHonorsLockOnStart() throws {
+        let caf = MockCaffeinateRunner()
+        let locker = MockScreenLocker()
+        let (manager, defaults, suite) = try makeManager(caf: caf, locker: locker)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Default config: lockOnStart off — promotion must not lock the screen.
+        manager.setAutoFollowEnabled(true)
+        manager.agentTracker.recordActivity(sourceID: "claude-code")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(manager.isFollowingAgents)
+        manager.promoteAutoFollowToManual()
+        #expect(manager.isRunning && !manager.isFollowingAgents)
+        #expect(locker.lockCount == 0, "promotion without lockOnStart must not lock the screen")
+
+        // Enabling lockOnStart and promoting again locks the screen (launchCaffeinate parity).
+        manager.switchManualToAutoFollow()
+        #expect(manager.isFollowingAgents)
+        manager.setLockOnStart(true)
+        manager.promoteAutoFollowToManual()
+        #expect(manager.isRunning && !manager.isFollowingAgents)
+        #expect(locker.lockCount == 1, "lockOnStart promotion must lock the screen")
+    }
+
     @Test func pauseResumeAndCancelAuthorizationStates() throws {
         var now = Date(timeIntervalSince1970: 1_700_000_000)
         let caf = MockCaffeinateRunner()
