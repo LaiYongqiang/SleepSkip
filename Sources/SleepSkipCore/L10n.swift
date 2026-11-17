@@ -108,7 +108,7 @@ public struct L10n {
     public var modeRecommendedBadge: String { isZh ? "省电推荐" : "Battery Saver" }
     public var modeTipBackground: String { isZh ? "续航最优" : "Best battery" }
     public var modeTipDisplay: String { isZh ? "建议调暗亮度" : "Lower brightness to save power" }
-    public var modeRowsFollowStateHint: String { isZh ? "转为手动后生效" : "Applies after switching to manual" }
+    public var durationFollowStateHint: String { isZh ? "转为手动后生效" : "Applies after switching to manual" }
 
     public var lockOnStartLabel: String { isZh ? "启动即锁屏" : "Lock on start" }
     public var closedLidLabel: String { isZh ? "合盖继续运行" : "Lid-closed" }

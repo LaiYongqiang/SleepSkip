@@ -322,7 +322,11 @@ struct SleepSkipPopoverView: View {
     // MARK: - Idle View
 
     private var idleContent: some View {
-        VStack(spacing: 12) {
+        // In following state the selector mirrors the live session mode (what the status card
+        // shows); idle still edits the saved config.
+        let displayedMode = manager.isFollowingAgents ? manager.activeMode : manager.config.mode
+
+        return VStack(spacing: 12) {
             if manager.popoverScene == .following {
                 autoFollowStatusCard
             } else {
@@ -335,27 +339,21 @@ struct SleepSkipPopoverView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.secondary)
                     Spacer()
-                    if manager.popoverScene == .following {
-                        Text(t.modeRowsFollowStateHint)
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text(manager.config.mode == .background ? t.modeTipBackground : t.modeTipDisplay)
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
+                    Text(displayedMode == .background ? t.modeTipBackground : t.modeTipDisplay)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
                 }
 
                 VStack(spacing: 0) {
                     modeRow(
                         mode: .background,
-                        isSelected: manager.config.mode == .background,
+                        isSelected: displayedMode == .background,
                         badge: t.modeRecommendedBadge
                     ) {
                         manager.selectMode(.background)
                     }
 
-                    if manager.config.mode == .background {
+                    if displayedMode == .background {
                         Divider()
                             .padding(.horizontal, 10)
 
@@ -396,18 +394,18 @@ struct SleepSkipPopoverView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .background(cardBackground(selected: manager.config.mode == .background))
-                .overlay(cardBorder(selected: manager.config.mode == .background))
+                .background(cardBackground(selected: displayedMode == .background))
+                .overlay(cardBorder(selected: displayedMode == .background))
 
                 modeRow(
                     mode: .keepDisplay,
-                    isSelected: manager.config.mode == .keepDisplay,
+                    isSelected: displayedMode == .keepDisplay,
                     badge: nil
                 ) {
                     manager.selectMode(.keepDisplay)
                 }
-                .background(cardBackground(selected: manager.config.mode == .keepDisplay))
-                .overlay(cardBorder(selected: manager.config.mode == .keepDisplay))
+                .background(cardBackground(selected: displayedMode == .keepDisplay))
+                .overlay(cardBorder(selected: displayedMode == .keepDisplay))
             }
             .disabled(manager.isAuthorizing)
             .opacity(manager.isAuthorizing ? 0.65 : 1.0)
@@ -418,9 +416,15 @@ struct SleepSkipPopoverView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.secondary)
                     Spacer()
-                    Text(DurationFormatter.formatDuration(manager.config.durationMinutes, isChinese: t.isZh))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
+                    if manager.isFollowingAgents {
+                        Text(t.durationFollowStateHint)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text(DurationFormatter.formatDuration(manager.config.durationMinutes, isChinese: t.isZh))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 HStack(spacing: 5) {
