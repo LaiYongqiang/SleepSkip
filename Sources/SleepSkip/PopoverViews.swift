@@ -72,9 +72,10 @@ struct SleepSkipPopoverView: View {
                 autoFollowNotice
             }
 
-            if manager.isRunning {
+            switch manager.popoverScene {
+            case .manualRunning:
                 runningContent
-            } else {
+            case .idle, .following:
                 idleContent
             }
         }
@@ -95,15 +96,16 @@ struct SleepSkipPopoverView: View {
 
             if manager.isAuthorizing {
                 statusBadge(t.authorizingBadge, color: .orange)
-            } else if manager.isFollowingAgents {
+            } else {
                 // Auto-follow reads as a different thing from a session the user started.
-                statusBadge(t.autoFollowBadge, color: .blue)
-            } else if manager.isRunning {
-                statusBadge(manager.activeClosedLid ? t.backpackBadge : t.runningBadge, color: .green)
-            } else if manager.autoFollowSuppressed {
-                statusBadge(t.pausedBadge, color: .orange)
-            } else if manager.externalCLI != nil {
-                statusBadge("CLI", color: .blue)
+                switch manager.popoverScene {
+                case .following:
+                    statusBadge(t.autoFollowBadge, color: .blue)
+                case .manualRunning:
+                    statusBadge(t.runningBadge, color: .green)
+                case .idle:
+                    EmptyView()
+                }
             }
 
             Spacer()
@@ -320,8 +322,16 @@ struct SleepSkipPopoverView: View {
     // MARK: - Idle View
 
     private var idleContent: some View {
-        VStack(spacing: 12) {
-            idleStatusCard
+        // In following state the selector mirrors the live session mode (what the status card
+        // shows); idle still edits the saved config.
+        let displayedMode = manager.isFollowingAgents ? manager.activeMode : manager.config.mode
+
+        return VStack(spacing: 12) {
+            if manager.popoverScene == .following {
+                autoFollowStatusCard
+            } else {
+                idleStatusCard
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -329,7 +339,7 @@ struct SleepSkipPopoverView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.secondary)
                     Spacer()
-                    Text(manager.config.mode == .background ? t.modeTipBackground : t.modeTipDisplay)
+                    Text(displayedMode == .background ? t.modeTipBackground : t.modeTipDisplay)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
@@ -337,13 +347,13 @@ struct SleepSkipPopoverView: View {
                 VStack(spacing: 0) {
                     modeRow(
                         mode: .background,
-                        isSelected: manager.config.mode == .background,
+                        isSelected: displayedMode == .background,
                         badge: t.modeRecommendedBadge
                     ) {
                         manager.selectMode(.background)
                     }
 
-                    if manager.config.mode == .background {
+                    if displayedMode == .background {
                         Divider()
                             .padding(.horizontal, 10)
 
@@ -384,18 +394,18 @@ struct SleepSkipPopoverView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .background(cardBackground(selected: manager.config.mode == .background))
-                .overlay(cardBorder(selected: manager.config.mode == .background))
+                .background(cardBackground(selected: displayedMode == .background))
+                .overlay(cardBorder(selected: displayedMode == .background))
 
                 modeRow(
                     mode: .keepDisplay,
-                    isSelected: manager.config.mode == .keepDisplay,
+                    isSelected: displayedMode == .keepDisplay,
                     badge: nil
                 ) {
                     manager.selectMode(.keepDisplay)
                 }
-                .background(cardBackground(selected: manager.config.mode == .keepDisplay))
-                .overlay(cardBorder(selected: manager.config.mode == .keepDisplay))
+                .background(cardBackground(selected: displayedMode == .keepDisplay))
+                .overlay(cardBorder(selected: displayedMode == .keepDisplay))
             }
             .disabled(manager.isAuthorizing)
             .opacity(manager.isAuthorizing ? 0.65 : 1.0)
@@ -406,9 +416,15 @@ struct SleepSkipPopoverView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.secondary)
                     Spacer()
-                    Text(DurationFormatter.formatDuration(manager.config.durationMinutes, isChinese: t.isZh))
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
+                    if manager.isFollowingAgents {
+                        Text(t.durationFollowStateHint)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text(DurationFormatter.formatDuration(manager.config.durationMinutes, isChinese: t.isZh))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 HStack(spacing: 5) {
@@ -473,7 +489,11 @@ struct SleepSkipPopoverView: View {
             .opacity(manager.isAuthorizing ? 0.65 : 1.0)
 
             Button(action: {
-                manager.startConfiguredSession()
+                if manager.isFollowingAgents {
+                    manager.promoteAutoFollowToManual()
+                } else {
+                    manager.startConfiguredSession()
+                }
             }) {
                 HStack(spacing: 6) {
                     if manager.isAuthorizing {
@@ -484,7 +504,7 @@ struct SleepSkipPopoverView: View {
                             .font(.system(size: 11))
                             .accessibilityHidden(true)
                     }
-                    Text(t.startButtonTitle(for: manager.config))
+                    Text(t.startButtonTitle(for: manager.config, isFollowingAgents: manager.isFollowingAgents))
                         .font(.system(size: 13, weight: .semibold))
                 }
                 .foregroundColor(.white)
@@ -506,49 +526,7 @@ struct SleepSkipPopoverView: View {
         let hasFolders = !manager.agentSources.isEmpty
         let hookOn = manager.claudeHookConnected
 
-        if manager.autoFollowSuppressed {
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 7, height: 7)
-                    Text(manager.autoFollowLimitReached ? t.autoFollowLimitTitle : t.autoFollowPausedTitle)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.primary)
-                }
-                Text(t.autoFollowPausedDetail(
-                    sourceKind: manager.activeAutoFollowSourceKind,
-                    limitReached: manager.autoFollowLimitReached
-                ))
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 10)
-
-                Button(t.resumeAutoFollowButton) {
-                    manager.resumeAutoFollow()
-                }
-                .buttonStyle(BorderedButtonStyle())
-                .controlSize(.small)
-
-                Text(t.launchConfigSummary(manager.config))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color.orange.opacity(0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(Color.orange.opacity(0.24), lineWidth: 1)
-            )
-        } else if watchFoldersOn && !hasFolders && !hookOn {
+        if watchFoldersOn && !hasFolders && !hookOn {
             VStack(spacing: 6) {
                 HStack(spacing: 6) {
                     Circle()
@@ -590,65 +568,157 @@ struct SleepSkipPopoverView: View {
                     .stroke(Color.orange.opacity(0.22), lineWidth: 1)
             )
         } else {
-            let statusMeta: (title: String, dotColor: Color, primary: Bool) = {
-                if watchFoldersOn && hasFolders && hookOn {
-                    return (t.idleFoldersAndHookTitle, .blue, true)
-                }
-                if watchFoldersOn && hasFolders {
-                    return (t.idleFoldersOnlyTitle, .blue, true)
-                }
-                if hookOn {
-                    return (t.idleHookOnlyTitle, .blue, true)
-                }
-                return (t.notRunningTitle, Color.secondary.opacity(0.45), false)
-            }()
-
-            VStack(spacing: 4) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusMeta.dotColor.opacity(statusMeta.primary ? 0.85 : 1.0))
-                        .frame(width: 7, height: 7)
-                    Text(statusMeta.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(statusMeta.primary ? .primary : .secondary)
-                }
-                Text(t.launchConfigSummary(manager.config))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 11)
-            .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
-            )
+            idleStandbyCard(watchFoldersOn: watchFoldersOn, hasFolders: hasFolders, hookOn: hookOn)
         }
+    }
+
+    /// The calm standby card. Suppressed auto-follow is presented inside this card rather than as
+    /// a separate scene.
+    private func idleStandbyCard(watchFoldersOn: Bool, hasFolders: Bool, hookOn: Bool) -> some View {
+        let suppressed = manager.autoFollowSuppressed
+        let hasSources = (watchFoldersOn && hasFolders) || hookOn
+        let accent: Color = suppressed ? .orange : (hasSources ? .blue : Color.secondary.opacity(0.45))
+        let title = suppressed
+            ? (manager.autoFollowLimitReached ? t.autoFollowLimitTitle : t.autoFollowPausedTitle)
+            : t.notRunningTitle
+        let summary: String = {
+            var parts: [String] = []
+            if watchFoldersOn && hasFolders {
+                parts.append(t.idleWatchingSourcesSummary(manager.agentSources.count))
+            }
+            if hookOn {
+                parts.append(t.idleHookReadySummary)
+            }
+            return parts.isEmpty ? t.launchConfigSummary(manager.config) : parts.joined(separator: " · ")
+        }()
+
+        return VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 7, height: 7)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(suppressed || hasSources ? .primary : .secondary)
+            }
+            Text(summary)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if suppressed {
+                Text(t.autoFollowPausedDetail(
+                    sourceKind: manager.activeAutoFollowSourceKind,
+                    limitReached: manager.autoFollowLimitReached
+                ))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10)
+
+                Button(t.resumeAutoFollowButton) {
+                    manager.resumeAutoFollow()
+                }
+                .buttonStyle(BorderedButtonStyle())
+                .controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, suppressed ? 10 : 11)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(suppressed ? Color.orange.opacity(0.08) : Color(NSColor.controlBackgroundColor).opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(Color.orange.opacity(suppressed ? 0.24 : 0), lineWidth: 1)
+        )
+    }
+
+    private var autoFollowStatusCard: some View {
+        let isGracePhase = manager.autoFollowGraceEndDate != nil
+        let statusAccent: Color = isGracePhase ? .orange : .green
+        let statusTitle = isGracePhase ? t.autoFollowGraceTitle : t.autoFollowActiveTitle
+        let displaySeconds = isGracePhase ? manager.autoFollowGraceRemainingSeconds : manager.remainingSeconds
+        let modeSummary = t.modeTitle(manager.activeMode)
+        let lidPart = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
+        let agentsText = t.autoFollowAgentsLabel(manager.followingAgents)
+        let sourceLine = agentsText.isEmpty
+            ? "\(t.autoFollowBadge) · \(modeSummary)\(lidPart)"
+            : "\(t.autoFollowBadge) · \(agentsText) · \(modeSummary)\(lidPart)"
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusAccent)
+                    .frame(width: 7, height: 7)
+                Text(statusTitle)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(statusAccent)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(DurationFormatter.formatCountdown(displaySeconds))
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(.primary)
+            }
+
+            Text(sourceLine)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.blue)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 8) {
+                if let endDate = manager.endDate {
+                    let timeText = DurationFormatter.formatClockTime(endDate)
+                    let detailText = isGracePhase
+                        ? t.autoFollowGraceDetail(timeText)
+                        : t.autoFollowCeilingLabel(timeText, sourceKind: manager.activeAutoFollowSourceKind)
+                    Text(detailText)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 4)
+                Button(t.autoFollowStopButton) {
+                    manager.stopSession(reason: .manual)
+                }
+                .buttonStyle(BorderedButtonStyle())
+                .controlSize(.small)
+                .tint(.red)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(statusAccent.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(statusAccent.opacity(0.22), lineWidth: 1)
+        )
     }
 
     // MARK: - Running View
 
     private var runningContent: some View {
-        let isGracePhase = manager.isFollowingAgents && manager.autoFollowGraceEndDate != nil
-        let statusAccent: Color = isGracePhase ? .orange : .green
-        let statusTitle: String = {
-            if manager.isFollowingAgents {
-                return isGracePhase ? t.autoFollowGraceTitle : t.autoFollowActiveTitle
-            }
-            return t.runningTitle
-        }()
         let modeSummary = t.modeTitle(manager.activeMode)
 
         return VStack(spacing: 12) {
             VStack(spacing: 5) {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(statusAccent)
+                        .fill(Color.green)
                         .frame(width: 7, height: 7)
-                    Text(statusTitle)
+                    Text(t.runningTitle)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(statusAccent)
+                        .foregroundColor(Color.green)
                 }
 
                 if manager.isIndefinite {
@@ -656,40 +726,18 @@ struct SleepSkipPopoverView: View {
                         .font(.system(size: 32, weight: .bold, design: .rounded))
                         .padding(.vertical, 2)
                 } else {
-                    let displaySeconds = isGracePhase ? manager.autoFollowGraceRemainingSeconds : manager.remainingSeconds
-                    Text(DurationFormatter.formatCountdown(displaySeconds))
+                    Text(DurationFormatter.formatCountdown(manager.remainingSeconds))
                         .font(.system(size: 36, weight: .bold, design: .rounded))
                         .monospacedDigit()
                 }
 
                 let lidPart = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
-                if manager.isFollowingAgents {
-                    let agentsText = t.autoFollowAgentsLabel(manager.followingAgents)
-                    let sourceLine = agentsText.isEmpty
-                        ? "\(t.autoFollowBadge) · \(modeSummary)"
-                        : "\(t.autoFollowBadge) · \(agentsText) · \(modeSummary)"
-                    Text(sourceLine)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.blue)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                } else {
-                    Text("\(modeSummary)\(lidPart)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
+                Text("\(modeSummary)\(lidPart)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
 
                 if let endDate = manager.endDate, !manager.isIndefinite {
-                    let detailText: String = {
-                        let timeText = DurationFormatter.formatClockTime(endDate)
-                        if manager.isFollowingAgents {
-                            return isGracePhase
-                                ? t.autoFollowGraceDetail(timeText)
-                                : t.autoFollowCeilingLabel(timeText, sourceKind: manager.activeAutoFollowSourceKind)
-                        }
-                        return t.projectedEndLabel(timeText)
-                    }()
-                    Text(detailText)
+                    Text(t.projectedEndLabel(DurationFormatter.formatClockTime(endDate)))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
@@ -700,11 +748,11 @@ struct SleepSkipPopoverView: View {
             .padding(.horizontal, 8)
             .background(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(statusAccent.opacity(0.08))
+                    .fill(Color.green.opacity(0.08))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(statusAccent.opacity(0.22), lineWidth: 1)
+                    .stroke(Color.green.opacity(0.22), lineWidth: 1)
             )
 
             VStack(alignment: .leading, spacing: 6) {
@@ -731,92 +779,65 @@ struct SleepSkipPopoverView: View {
                 }
                 .background(cardBackground(selected: manager.activeMode == .keepDisplay))
                 .overlay(cardBorder(selected: manager.activeMode == .keepDisplay))
-
-                if manager.isFollowingAgents {
-                    Text(t.modeSwitchAutoFollowNote)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
 
-            if manager.isFollowingAgents {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(t.autoFollowPolicySummary(manager.activeAutoFollowSourceKind))
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(t.currentSettingLabel(DurationFormatter.formatDuration(manager.initialMinutes, isChinese: t.isZh)))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    let manualDurationText = DurationFormatter.formatDuration(
-                        manager.config.durationMinutes,
-                        isChinese: t.isZh
-                    )
-                    Button(t.switchToManualButton(manualDurationText)) {
-                        manager.promoteAutoFollowToManual()
+                    Spacer()
+                    if !manager.isIndefinite {
+                        Button(t.extend30mButton) {
+                            manager.extendSession(byMinutes: 30)
+                        }
+                        .buttonStyle(BorderedButtonStyle())
+                        .controlSize(.small)
                     }
-                    .buttonStyle(LinkButtonStyle())
-                    .font(.system(size: 11))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(t.currentSettingLabel(DurationFormatter.formatDuration(manager.initialMinutes, isChinese: t.isZh)))
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        if !manager.isIndefinite {
-                            Button(t.extend30mButton) {
-                                manager.extendSession(byMinutes: 30)
-                            }
-                            .buttonStyle(BorderedButtonStyle())
-                            .controlSize(.small)
-                        }
-                    }
 
-                    if manager.canSwitchToAutoFollow {
-                        if manager.pendingAutoFollowSwitchConfirmation {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(t.confirmAutoFollowSwitchTitle)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(.primary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Text(t.confirmAutoFollowSwitchDetail)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                HStack(spacing: 8) {
-                                    Button(t.confirmAutoFollowSwitchButton) {
-                                        manager.switchManualToAutoFollow()
-                                    }
-                                    .buttonStyle(BorderedButtonStyle())
-                                    .controlSize(.small)
-                                    .tint(.orange)
-
-                                    Button(t.keepClosedLidSessionButton) {
-                                        manager.cancelSwitchToAutoFollow()
-                                    }
-                                    .buttonStyle(BorderedButtonStyle())
-                                    .controlSize(.small)
+                if manager.canSwitchToAutoFollow {
+                    if manager.pendingAutoFollowSwitchConfirmation {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(t.confirmAutoFollowSwitchTitle)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(t.confirmAutoFollowSwitchDetail)
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 8) {
+                                Button(t.confirmAutoFollowSwitchButton) {
+                                    manager.switchManualToAutoFollow()
                                 }
+                                .buttonStyle(BorderedButtonStyle())
+                                .controlSize(.small)
+                                .tint(.orange)
+
+                                Button(t.keepClosedLidSessionButton) {
+                                    manager.cancelSwitchToAutoFollow()
+                                }
+                                .buttonStyle(BorderedButtonStyle())
+                                .controlSize(.small)
                             }
-                            .padding(9)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(Color.orange.opacity(0.1))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color.orange.opacity(0.28), lineWidth: 1)
-                            )
-                        } else {
-                            Button(t.returnToAutoFollowButton(dropsClosedLid: manager.activeClosedLid)) {
-                                manager.requestSwitchManualToAutoFollow()
-                            }
-                            .buttonStyle(LinkButtonStyle())
-                            .font(.system(size: 11))
                         }
+                        .padding(9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.orange.opacity(0.1))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.orange.opacity(0.28), lineWidth: 1)
+                        )
+                    } else {
+                        Button(t.returnToAutoFollowButton(dropsClosedLid: manager.dropsClosedLidOnAutoFollowSwitch)) {
+                            manager.requestSwitchManualToAutoFollow()
+                        }
+                        .buttonStyle(LinkButtonStyle())
+                        .font(.system(size: 11))
                     }
                 }
             }
@@ -830,7 +851,7 @@ struct SleepSkipPopoverView: View {
                             .fill(Color.red)
                             .frame(width: 9, height: 9)
                             .accessibilityHidden(true)
-                        Text(manager.isFollowingAgents ? t.autoFollowStopButton : t.stopButton)
+                        Text(t.stopButton)
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.red)
                     }
@@ -870,23 +891,6 @@ struct SleepSkipPopoverView: View {
                     }
                 }
                 .buttonStyle(PlainButtonStyle())
-
-                Spacer()
-
-                Button(action: {
-                    manager.stopSession(reason: .silent)
-                    NSApp.terminate(nil)
-                }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "rectangle.portrait.and.arrow.right")
-                            .font(.system(size: 11))
-                            .accessibilityHidden(true)
-                        Text(t.quitButton)
-                            .font(.system(size: 12))
-                    }
-                    .foregroundColor(.secondary)
-                }
-                .buttonStyle(PlainButtonStyle())
             }
             .padding(.horizontal, 2)
         }
@@ -919,11 +923,13 @@ struct SleepSkipPopoverView: View {
         }()
         let subtitle: String = {
             let mode = t.modeTitle(manager.activeMode)
+            let lidSuffix = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
             if manager.isFollowingAgents {
                 let agents = t.autoFollowAgentsLabel(manager.followingAgents)
-                return agents.isEmpty ? "\(t.autoFollowBadge) · \(mode)" : "\(agents) · \(mode)"
+                let base = agents.isEmpty ? "\(t.autoFollowBadge) · \(mode)" : "\(agents) · \(mode)"
+                return "\(base)\(lidSuffix)"
             }
-            return manager.activeClosedLid ? "\(mode) · \(t.backpackBadge)" : mode
+            return "\(mode)\(lidSuffix)"
         }()
 
         return HStack(spacing: 8) {
@@ -995,13 +1001,6 @@ struct SleepSkipPopoverView: View {
 
                 Spacer()
 
-                Button(t.quitButton) {
-                    manager.stopSession(reason: .silent)
-                    NSApp.terminate(nil)
-                }
-                .buttonStyle(BorderedButtonStyle())
-                .controlSize(.small)
-
                 Button(t.backButton) {
                     manager.showSettings = false
                 }
@@ -1024,76 +1023,7 @@ struct SleepSkipPopoverView: View {
                     .padding(10)
                     .background(settingsCardBackground)
 
-                    // 2. Claude Code Hook card (always visible and independent)
-                    VStack(alignment: .leading, spacing: 8) {
-                        claudeHookSection
-                    }
-                    .padding(10)
-                    .background(settingsCardBackground)
-
-                    // 3. General card
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(t.generalSectionTitle)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.secondary)
-
-                        HStack {
-                            Text(t.launchAtLoginLabel)
-                                .font(.system(size: 12))
-                            Spacer()
-                            Toggle("", isOn: Binding(
-                                get: { manager.launchAtLogin },
-                                set: { manager.toggleLaunchAtLogin($0) }
-                            ))
-                            .labelsHidden()
-                            .toggleStyle(SwitchToggleStyle())
-                            .controlSize(.small)
-                            .accessibilityLabel(t.launchAtLoginLabel)
-                        }
-
-                        Divider()
-
-                        HStack {
-                            Text(t.globalShortcutLabel)
-                                .font(.system(size: 12))
-                            Spacer()
-                            Toggle("", isOn: Binding(
-                                get: { manager.config.globalShortcutEnabled },
-                                set: { manager.setGlobalShortcutEnabled($0) }
-                            ))
-                            .labelsHidden()
-                            .toggleStyle(SwitchToggleStyle())
-                            .controlSize(.small)
-                            .accessibilityLabel(t.globalShortcutLabel)
-                        }
-
-                        Divider()
-
-                        cliInstallSection
-
-                        Divider()
-
-                        HStack {
-                            Text(t.languageLabel)
-                                .font(.system(size: 12))
-                            Spacer()
-                            Picker("", selection: Binding(
-                                get: { manager.config.language },
-                                set: { manager.setLanguage($0) }
-                            )) {
-                                Text(t.languageSystem).tag(AppLanguage.system)
-                                Text("中文").tag(AppLanguage.zhHans)
-                                Text("English").tag(AppLanguage.en)
-                            }
-                            .labelsHidden()
-                            .frame(width: 120)
-                            .accessibilityLabel(t.languageLabel)
-                        }
-                    }
-                    .padding(10)
-                    .background(settingsCardBackground)
-
-                    // 4. Power, Thermal & Lid card (flat, no nested disclosure)
+                    // 2. Power, Thermal & Lid card (flat, no nested disclosure)
                     VStack(alignment: .leading, spacing: 8) {
                         Text(t.powerAndLidSectionTitle)
                             .font(.system(size: 11, weight: .semibold))
@@ -1162,6 +1092,75 @@ struct SleepSkipPopoverView: View {
                         Divider()
 
                         lidStrategyPicker(manager: manager, t: t)
+                    }
+                    .padding(10)
+                    .background(settingsCardBackground)
+
+                    // 3. Claude Code Hook card (always visible and independent)
+                    VStack(alignment: .leading, spacing: 8) {
+                        claudeHookSection
+                    }
+                    .padding(10)
+                    .background(settingsCardBackground)
+
+                    // 4. General card
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(t.generalSectionTitle)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.secondary)
+
+                        HStack {
+                            Text(t.launchAtLoginLabel)
+                                .font(.system(size: 12))
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { manager.launchAtLogin },
+                                set: { manager.toggleLaunchAtLogin($0) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(SwitchToggleStyle())
+                            .controlSize(.small)
+                            .accessibilityLabel(t.launchAtLoginLabel)
+                        }
+
+                        Divider()
+
+                        HStack {
+                            Text(t.globalShortcutLabel)
+                                .font(.system(size: 12))
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { manager.config.globalShortcutEnabled },
+                                set: { manager.setGlobalShortcutEnabled($0) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(SwitchToggleStyle())
+                            .controlSize(.small)
+                            .accessibilityLabel(t.globalShortcutLabel)
+                        }
+
+                        Divider()
+
+                        cliInstallSection
+
+                        Divider()
+
+                        HStack {
+                            Text(t.languageLabel)
+                                .font(.system(size: 12))
+                            Spacer()
+                            Picker("", selection: Binding(
+                                get: { manager.config.language },
+                                set: { manager.setLanguage($0) }
+                            )) {
+                                Text(t.languageSystem).tag(AppLanguage.system)
+                                Text("中文").tag(AppLanguage.zhHans)
+                                Text("English").tag(AppLanguage.en)
+                            }
+                            .labelsHidden()
+                            .frame(width: 120)
+                            .accessibilityLabel(t.languageLabel)
+                        }
                     }
                     .padding(10)
                     .background(settingsCardBackground)
@@ -1443,18 +1442,19 @@ struct SleepSkipPopoverView: View {
 
     private var claudeHookSection: some View {
         let hookStatus = manager.hookProtectionStatus
+        let isHolding: Bool = {
+            if case .holding = hookStatus { return true }
+            return false
+        }()
         let statusColor: Color = {
             switch hookStatus {
-            case .none: return .secondary
-            case .holding: return .blue
-            case .paused: return .orange
-            case .standbyBehindManual: return .secondary
-            case .waitingForAuthorization(let existing):
-                switch existing {
-                case .none: return .orange
-                case .manual: return .secondary
-                case .autoFollow: return .blue
-                }
+            case .holding:
+                return .blue
+            // Waiting for an authorization the user must grant: an actionable state, not a gray one.
+            case .waitingForAuthorization(let existing) where existing == .none:
+                return .orange
+            default:
+                return .secondary
             }
         }()
 
@@ -1464,9 +1464,10 @@ struct SleepSkipPopoverView: View {
                     .font(.system(size: 12, weight: .semibold))
                 statusBadge(t.claudeHookIndependentBadge, color: .secondary)
                 Spacer()
-                if let badge = t.claudeHookStatusBadge(hookStatus) {
-                    statusBadge(badge, color: statusColor)
-                }
+                statusBadge(
+                    isHolding ? t.claudeHookHoldingBadge : t.claudeHookNotHoldingBadge,
+                    color: statusColor
+                )
             }
 
             HStack {
@@ -1491,7 +1492,7 @@ struct SleepSkipPopoverView: View {
                 HStack(spacing: 6) {
                     Text(detail)
                         .font(.system(size: 11))
-                        .foregroundColor(statusColor == .orange ? .orange : .primary)
+                        .foregroundColor(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     if case .paused = hookStatus {
                         Spacer(minLength: 4)

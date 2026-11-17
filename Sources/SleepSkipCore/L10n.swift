@@ -12,17 +12,13 @@ public struct L10n {
     public var runningBadge: String { isZh ? "运行中" : "Active" }
     public var backpackBadge: String { isZh ? "合盖运行中" : "Lid-Closed" }
     public var authorizingBadge: String { isZh ? "等待授权" : "Authorizing" }
-    public var pausedBadge: String { isZh ? "已暂停" : "Paused" }
 
     public var notRunningTitle: String { isZh ? "空闲待命" : "Idle" }
-    public var idleFoldersAndHookTitle: String {
-        isZh ? "待命 · 监听目录与 Claude Hook" : "Ready · Watching Folders & Hook"
+    public func idleWatchingSourcesSummary(_ count: Int) -> String {
+        isZh ? "监听 \(count) 个来源" : "Watching \(count) source\(count == 1 ? "" : "s")"
     }
-    public var idleFoldersOnlyTitle: String {
-        isZh ? "待命 · 正在监听 Agent 目录" : "Ready · Watching Agent Folders"
-    }
-    public var idleHookOnlyTitle: String {
-        isZh ? "待命 · Claude Code Hook 已就绪" : "Ready · Claude Code Hook Ready"
+    public var idleHookReadySummary: String {
+        isZh ? "Hook 已连接" : "Hook connected"
     }
     public var idleNoSourcesTitle: String {
         isZh ? "待命 · 未找到可用 Agent 目录" : "Standby · No Agent Folders Found"
@@ -112,19 +108,20 @@ public struct L10n {
     public var modeRecommendedBadge: String { isZh ? "省电推荐" : "Battery Saver" }
     public var modeTipBackground: String { isZh ? "续航最优" : "Best battery" }
     public var modeTipDisplay: String { isZh ? "建议调暗亮度" : "Lower brightness to save power" }
+    public var durationFollowStateHint: String { isZh ? "转为手动后生效" : "Applies after switching to manual" }
 
     public var lockOnStartLabel: String { isZh ? "启动即锁屏" : "Lock on start" }
-    public var closedLidLabel: String { isZh ? "合盖继续运行（实验性）" : "Lid-closed (experimental)" }
+    public var closedLidLabel: String { isZh ? "合盖继续运行" : "Lid-closed" }
     public func closedLidInlineNote(strategy: ClosedLidStrategy) -> String {
         switch strategy {
         case .unprivileged:
             return isZh
-                ? "实验性 · 标准模式（无需授权）：合盖后插回电源约 6–9 秒会睡眠。保持通风并在本机验证恢复。"
-                : "Experimental · Standard (no auth): plugging power back in while shut sleeps after 6–9 s. Keep ventilated & verify recovery."
+                ? "实验性 · 合盖后插回电源约 6–9 秒会睡眠，详情见偏好设置"
+                : "Experimental · Sleeps ~6–9 s after plugging power back in while closed; see Preferences"
         case .privileged:
             return isZh
-                ? "实验性 · 兼容模式（需管理员授权）：每次启动需授权一次，停止后请在本机验证恢复休眠。"
-                : "Experimental · Compatibility (admin auth): prompts once per start; verify sleep recovery on this Mac."
+                ? "实验性 · 每次启动需管理员授权一次，详情见偏好设置"
+                : "Experimental · Needs admin authorization once per start; see Preferences"
         }
     }
     public var changeClosedLidMethodButton: String { isZh ? "切换方式" : "Change method" }
@@ -158,17 +155,19 @@ public struct L10n {
     public var minutesUnit: String { isZh ? "分钟" : "min" }
     public var applyButton: String { isZh ? "应用" : "Apply" }
 
-    public func startButtonTitle(for config: SessionConfig) -> String {
+    public func startButtonTitle(for config: SessionConfig, isFollowingAgents: Bool = false) -> String {
         let needsAuth = config.effectiveAllowClosedLid && config.closedLidStrategy == .privileged
-        let locks = config.effectiveLockOnStart
-        if needsAuth {
-            return locks
-                ? (isZh ? "授权、开始并锁屏 (⏎)" : "Authorize, Start & Lock (⏎)")
-                : (isZh ? "授权并开始保持唤醒 (⏎)" : "Authorize & Start Keeping Awake (⏎)")
+        let durationText = DurationFormatter.formatDuration(config.durationMinutes, isChinese: isZh)
+        if isFollowingAgents {
+            // In following state the primary action promotes the session to manual.
+            return needsAuth
+                ? (isZh ? "授权转手动 · \(durationText)" : "Authorize & Switch · \(durationText)")
+                : (isZh ? "转为手动 · \(durationText)" : "Switch to Manual · \(durationText)")
         }
-        return locks
-            ? (isZh ? "开始并锁屏 (⏎)" : "Start & Lock Screen (⏎)")
-            : (isZh ? "开始保持唤醒 (⏎)" : "Start Keeping Awake (⏎)")
+        if needsAuth {
+            return isZh ? "授权并开始保持唤醒" : "Authorize & Start"
+        }
+        return isZh ? "开始保持唤醒" : "Start Keeping Awake"
     }
 
     public var stopButton: String { isZh ? "停止保持唤醒" : "Stop Keeping Awake" }
@@ -332,6 +331,7 @@ public struct L10n {
     public var claudeHookConnectedBadge: String { isZh ? "已连接" : "Connected" }
     public var claudeHookDisconnectedBadge: String { isZh ? "未连接" : "Not Connected" }
     public var claudeHookHoldingBadge: String { isZh ? "保持中" : "Holding" }
+    public var claudeHookNotHoldingBadge: String { isZh ? "未保持" : "Not Holding" }
     public func claudeHookStatusBadge(_ status: HookProtectionStatus) -> String? {
         switch status {
         case .none:
@@ -456,16 +456,6 @@ public struct L10n {
     public var autoFollowActiveTitle: String { isZh ? "Agent 运行中，正在保持唤醒" : "Keeping Awake for Agent" }
     public var autoFollowGraceTitle: String { isZh ? "目录已停笔，即将自动释放" : "Agent Quiet · Releasing Soon" }
 
-    public var modeSwitchAutoFollowNote: String {
-        isZh
-            ? "切换仅改变是否息屏，仍按自动跟随规则释放"
-            : "Changes display sleep only; auto-follow release still applies"
-    }
-    public func switchToManualButton(_ durationText: String) -> String {
-        isZh
-            ? "转为手动计时（\(durationText)，不随 Agent 释放）"
-            : "Take Over as Manual (\(durationText), ignores agent stop)"
-    }
     public func returnToAutoFollowButton(dropsClosedLid: Bool) -> String {
         if dropsClosedLid {
             return isZh ? "切回自动跟随（将关闭合盖保护）" : "Return to Auto-Follow (disables lid-closed)"
@@ -477,8 +467,8 @@ public struct L10n {
     }
     public var confirmAutoFollowSwitchDetail: String {
         isZh
-            ? "自动跟随不支持合盖运行。确认切回将立即关闭合盖保护并转为 2 小时上限的后台自动跟随；如需继续合盖，请保留当前手动会话。"
-            : "Auto-follow does not support lid-closed mode. Switching disables lid protection immediately and continues in background auto-follow (2h cap). Keep this manual session to stay lid-closed."
+            ? "切回后将关闭合盖保护，并转为 2 小时上限的自动跟随"
+            : "Switching disables lid-closed protection and resumes auto-follow (2h cap)"
     }
     public var confirmAutoFollowSwitchButton: String {
         isZh ? "关闭合盖并切回" : "Disable Lid & Switch"
