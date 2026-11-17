@@ -607,7 +607,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 if self.sessionManager.isAuthorizing {
                     return nil
                 }
-                if self.sessionManager.isRunning && !self.sessionManager.isFollowingAgents {
+                if self.sessionManager.isRunning {
+                    // Manual or auto-follow: Enter only closes the panel, it never starts or promotes.
                     self.closePopover()
                 } else {
                     self.sessionManager.startConfiguredSession()
@@ -755,9 +756,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             cancelItem.target = self
             menu.addItem(cancelItem)
         } else if sessionManager.isFollowingAgents {
-            let startItem = NSMenuItem(title: t.menuQuickStart, action: #selector(menuQuickStart), keyEquivalent: "")
-            startItem.target = self
-            menu.addItem(startItem)
+            let promoteItem = NSMenuItem(
+                title: t.startButtonTitle(for: sessionManager.config, isFollowingAgents: true),
+                action: #selector(menuPromoteToManual),
+                keyEquivalent: ""
+            )
+            promoteItem.target = self
+            menu.addItem(promoteItem)
 
             let stopItem = NSMenuItem(title: t.autoFollowStopButton, action: #selector(menuStop), keyEquivalent: "")
             stopItem.target = self
@@ -805,6 +810,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func menuQuickStart() {
         sessionManager.startConfiguredSession()
+    }
+
+    @objc private func menuPromoteToManual() {
+        sessionManager.promoteAutoFollowToManual()
     }
 
     @objc private func menuStop() {

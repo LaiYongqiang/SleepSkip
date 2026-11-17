@@ -672,19 +672,21 @@ struct SleepSkipCoreTests {
         // 确认弹窗详情中文 ≤40 字符。
         #expect(zh.confirmAutoFollowSwitchDetail.count <= 40, "confirm detail exceeds 40 chars: \(zh.confirmAutoFollowSwitchDetail)")
 
-        // startButtonTitle 在任何配置组合下都不得重新长出 ⏎ 提示或文件路径字符。
+        // startButtonTitle 在任何配置组合（含跟随态转手动变体）下都不得重新长出 ⏎ 提示或文件路径字符。
         for mode in GuardMode.allCases {
             for lockOnStart in [false, true] {
                 for allowClosedLid in [false, true] {
                     for strategy in ClosedLidStrategy.allCases {
-                        var cfg = SessionConfig(mode: mode, durationMinutes: 60, lockOnStart: lockOnStart, allowClosedLid: allowClosedLid)
-                        cfg.closedLidStrategy = strategy
-                        for l10n in [zh, en] {
-                            let title = l10n.startButtonTitle(for: cfg)
-                            #expect(!title.contains("⏎"), "start button must not embed the return-key hint: \(title)")
-                            #expect(!title.contains("~/"), "start button must not contain path characters: \(title)")
-                            let budget = l10n.isZh ? 14 : 28
-                            #expect(title.count <= budget, "start button title exceeds budget: \(title)")
+                        for isFollowing in [false, true] {
+                            var cfg = SessionConfig(mode: mode, durationMinutes: 60, lockOnStart: lockOnStart, allowClosedLid: allowClosedLid)
+                            cfg.closedLidStrategy = strategy
+                            for l10n in [zh, en] {
+                                let title = l10n.startButtonTitle(for: cfg, isFollowingAgents: isFollowing)
+                                #expect(!title.contains("⏎"), "start button must not embed the return-key hint: \(title)")
+                                #expect(!title.contains("~/"), "start button must not contain path characters: \(title)")
+                                let budget = l10n.isZh ? 14 : 28
+                                #expect(title.count <= budget, "start button title exceeds budget: \(title)")
+                            }
                         }
                     }
                 }
@@ -1744,6 +1746,96 @@ struct SleepSkipCoreTests {
             #expect(!manager.pendingAutoFollowSwitchConfirmation)
             #expect(!isProtected())
         }
+    }
+
+    @Test func beginAutoFollowSurfacesUnprivilegedLidGuardFailure() throws {
+        final class FailingLidGuard: ClosedLidGuarding {
+            var isEngaged = false
+            func enable(completion: @escaping (Result<Void, Error>) -> Void) {
+                completion(.failure(NSError(domain: "MockLid", code: -1, userInfo: [NSLocalizedDescriptionKey: "rejected"])))
+            }
+            func disable() { isEngaged = false }
+        }
+        let caf = MockCaffeinateRunner()
+        let lid = FailingLidGuard()
+        let suite = "ss.lidfollow.fail.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = SessionManager(
+            store: PreferencesStore(defaults: defaults),
+            caffeinateRunner: caf,
+            backpackGuard: MockBackpackGuard(),
+            unprivilegedLidGuard: lid,
+            powerMonitor: MockPowerMonitor(),
+            screenLocker: MockScreenLocker(),
+            notifier: MockNotifier(),
+            loginItem: MockLoginItem(),
+            checkStaleSleepOnInit: false
+        )
+
+        manager.setClosedLidStrategy(.unprivileged)
+        manager.setAllowClosedLid(true)
+        manager.setAutoFollowEnabled(true)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+
+        #expect(manager.isFollowingAgents)
+        #expect(!manager.activeClosedLid, "failed lid guard must not report closed-lid protection")
+        #expect(!lid.isEngaged)
+        #expect(manager.errorMessage != nil, "guard failure must surface, not stay silent")
+    }
+
+    @Test func switchManualToAutoFollowAbortsWhenLidGuardHandoffFails() throws {
+        final class FailingLidGuard: ClosedLidGuarding {
+            var isEngaged = false
+            func enable(completion: @escaping (Result<Void, Error>) -> Void) {
+                completion(.failure(NSError(domain: "MockLid", code: -1, userInfo: [NSLocalizedDescriptionKey: "rejected"])))
+            }
+            func disable() { isEngaged = false }
+        }
+        let caf = MockCaffeinateRunner()
+        let bag = MockBackpackGuard()
+        bag.deferEnableCompletion = true
+        let lid = FailingLidGuard()
+        let suite = "ss.lidswitch.fail.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let manager = SessionManager(
+            store: PreferencesStore(defaults: defaults),
+            caffeinateRunner: caf,
+            backpackGuard: bag,
+            unprivilegedLidGuard: lid,
+            powerMonitor: MockPowerMonitor(),
+            screenLocker: MockScreenLocker(),
+            notifier: MockNotifier(),
+            loginItem: MockLoginItem(),
+            checkStaleSleepOnInit: false
+        )
+
+        manager.setAutoFollowEnabled(true)
+        manager.setClosedLidStrategy(.privileged)
+        manager.setAllowClosedLid(true)
+        manager.startConfiguredSession()
+        #expect(manager.isAuthorizing)
+        bag.finishPendingEnable()
+        #expect(manager.isRunning && manager.activeClosedLid && bag.enabled)
+
+        // Mid-session strategy change takes effect next session; the config now claims the
+        // standard guard can carry auto-follow, so the switch skips confirmation.
+        manager.setClosedLidStrategy(.unprivileged)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        #expect(manager.canSwitchToAutoFollow)
+        #expect(!manager.dropsClosedLidOnAutoFollowSwitch)
+        let startsBeforeSwitch = caf.startCount
+
+        manager.requestSwitchManualToAutoFollow()
+        // Handoff enable failed: the switch must abort with the manual session intact.
+        #expect(manager.isRunning && !manager.isFollowingAgents)
+        #expect(manager.activeClosedLid, "manual lid protection must survive the aborted switch")
+        #expect(bag.enabled, "the engaged manual guard must not be released")
+        #expect(!lid.isEngaged)
+        #expect(manager.errorMessage != nil)
+        #expect(caf.startCount == startsBeforeSwitch, "aborted switch must not restart the runner")
     }
 
     @Test func hookProtectionStatusTracksOwnershipAcrossPauseLimitManualAndMultiSource() throws {

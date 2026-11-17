@@ -479,7 +479,11 @@ struct SleepSkipPopoverView: View {
             .opacity(manager.isAuthorizing ? 0.65 : 1.0)
 
             Button(action: {
-                manager.startConfiguredSession()
+                if manager.isFollowingAgents {
+                    manager.promoteAutoFollowToManual()
+                } else {
+                    manager.startConfiguredSession()
+                }
             }) {
                 HStack(spacing: 6) {
                     if manager.isAuthorizing {
@@ -490,7 +494,7 @@ struct SleepSkipPopoverView: View {
                             .font(.system(size: 11))
                             .accessibilityHidden(true)
                     }
-                    Text(t.startButtonTitle(for: manager.config))
+                    Text(t.startButtonTitle(for: manager.config, isFollowingAgents: manager.isFollowingAgents))
                         .font(.system(size: 13, weight: .semibold))
                 }
                 .foregroundColor(.white)

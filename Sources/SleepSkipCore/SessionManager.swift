@@ -454,9 +454,15 @@ public final class SessionManager: ObservableObject {
         let ceilingSeconds = max(1, Int(agentTracker.currentPolicy.maxAutoSessionDuration.rounded()))
         var lidEngaged = false
         if canEngageUnprivilegedLidForAutoFollow, let unprivilegedLidGuard {
-            unprivilegedLidGuard.enable { result in
-                if case .success = result {
+            unprivilegedLidGuard.enable { [weak self] result in
+                switch result {
+                case .success:
                     lidEngaged = true
+                case .failure:
+                    guard let self else { return }
+                    // The user asked for lid protection on this session: never swallow the
+                    // guard failure, or closing the lid would silently sleep the Mac.
+                    self.errorMessage = self.l10n.unprivilegedLidUnavailable
                 }
             }
         }
@@ -1287,6 +1293,25 @@ public final class SessionManager: ObservableObject {
         errorMessage = nil
         pendingAutoFollowSwitchConfirmation = false
         let ceilingSeconds = max(1, Int(agentTracker.currentPolicy.maxAutoSessionDuration.rounded()))
+        let completedManualClosedLid = activeClosedLid
+        // The standard no-auth guard takes over lid protection; when it is not available the
+        // guard is dropped together with the manual session.
+        let lidHandoffGuard = (activeMode == .background && canEngageUnprivilegedLidForAutoFollow)
+            ? unprivilegedLidGuard : nil
+
+        // Engage the standard guard before anything else is torn down: if it cannot take over,
+        // abort the switch so the manual session keeps its own protection instead of continuing
+        // into an unprotected auto-follow.
+        if let lidHandoffGuard, !lidHandoffGuard.isEngaged {
+            var engaged = false
+            lidHandoffGuard.enable { result in
+                if case .success = result { engaged = true }
+            }
+            guard engaged else {
+                errorMessage = l10n.unprivilegedLidUnavailable
+                return
+            }
+        }
 
         do {
             try caffeinateRunner.start(mode: activeMode, timeoutSeconds: ceilingSeconds + 30) { [weak self] in
@@ -1297,30 +1322,17 @@ public final class SessionManager: ObservableObject {
             return
         }
 
-        let completedManualClosedLid = activeClosedLid
-        if activeMode == .background, canEngageUnprivilegedLidForAutoFollow, let unprivilegedLidGuard {
-            if !unprivilegedLidGuard.isEngaged {
-                var engaged = false
-                unprivilegedLidGuard.enable { result in
-                    if case .success = result { engaged = true }
-                }
-                activeClosedLid = engaged
-            } else {
-                activeClosedLid = true
-            }
+        if lidHandoffGuard != nil {
             backpackGuard.disable()
-        } else if activeClosedLid {
+        } else if completedManualClosedLid {
             backpackGuard.disable()
             unprivilegedLidGuard?.disable()
-            activeClosedLid = false
         }
-        activeClosedLid = completedManualClosedLid
+
+        // Record while activeClosedLid still reflects the manual session, then publish the
+        // auto-follow value.
         recordCompletedSession(stopReasonCode: "manual")
-        if activeMode == .background, canEngageUnprivilegedLidForAutoFollow, let unprivilegedLidGuard {
-            activeClosedLid = unprivilegedLidGuard.isEngaged
-        } else {
-            activeClosedLid = false
-        }
+        activeClosedLid = lidHandoffGuard?.isEngaged ?? false
         autoFollowSuppressed = false
         autoFollowLimitReached = false
         if config.autoFollowAgents {

@@ -155,8 +155,15 @@ public struct L10n {
     public var minutesUnit: String { isZh ? "分钟" : "min" }
     public var applyButton: String { isZh ? "应用" : "Apply" }
 
-    public func startButtonTitle(for config: SessionConfig) -> String {
+    public func startButtonTitle(for config: SessionConfig, isFollowingAgents: Bool = false) -> String {
         let needsAuth = config.effectiveAllowClosedLid && config.closedLidStrategy == .privileged
+        let durationText = DurationFormatter.formatDuration(config.durationMinutes, isChinese: isZh)
+        if isFollowingAgents {
+            // In following state the primary action promotes the session to manual.
+            return needsAuth
+                ? (isZh ? "授权转手动 · \(durationText)" : "Authorize & Switch · \(durationText)")
+                : (isZh ? "转为手动 · \(durationText)" : "Switch to Manual · \(durationText)")
+        }
         if needsAuth {
             return isZh ? "授权并开始保持唤醒" : "Authorize & Start"
         }
