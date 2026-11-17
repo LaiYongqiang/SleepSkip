@@ -119,12 +119,12 @@ public struct L10n {
         switch strategy {
         case .unprivileged:
             return isZh
-                ? "实验性 · 标准模式（无需授权）：合盖后插回电源约 6–9 秒会睡眠。保持通风并在本机验证恢复。"
-                : "Experimental · Standard (no auth): plugging power back in while shut sleeps after 6–9 s. Keep ventilated & verify recovery."
+                ? "实验性 · 合盖后插回电源约 6–9 秒会睡眠，详情见偏好设置"
+                : "Experimental · Sleeps ~6–9 s after plugging power back in while closed; see Preferences"
         case .privileged:
             return isZh
-                ? "实验性 · 兼容模式（需管理员授权）：每次启动需授权一次，停止后请在本机验证恢复休眠。"
-                : "Experimental · Compatibility (admin auth): prompts once per start; verify sleep recovery on this Mac."
+                ? "实验性 · 每次启动需管理员授权一次，详情见偏好设置"
+                : "Experimental · Needs admin authorization once per start; see Preferences"
         }
     }
     public var changeClosedLidMethodButton: String { isZh ? "切换方式" : "Change method" }
@@ -158,28 +158,12 @@ public struct L10n {
     public var minutesUnit: String { isZh ? "分钟" : "min" }
     public var applyButton: String { isZh ? "应用" : "Apply" }
 
-    public func startButtonTitle(for config: SessionConfig, isFollowingAgents: Bool = false) -> String {
+    public func startButtonTitle(for config: SessionConfig) -> String {
         let needsAuth = config.effectiveAllowClosedLid && config.closedLidStrategy == .privileged
-        let locks = config.effectiveLockOnStart
-        if isFollowingAgents {
-            let durText = DurationFormatter.formatDuration(config.durationMinutes, isChinese: isZh)
-            if needsAuth {
-                return locks
-                    ? (isZh ? "授权、转为手动并锁屏 · \(durText) (⏎)" : "Authorize, Switch & Lock · \(durText) (⏎)")
-                    : (isZh ? "授权并转为手动计时 · \(durText) (⏎)" : "Authorize & Switch to Manual · \(durText) (⏎)")
-            }
-            return locks
-                ? (isZh ? "转为手动并锁屏 · \(durText) (⏎)" : "Switch to Manual & Lock · \(durText) (⏎)")
-                : (isZh ? "转为手动计时 · \(durText) (⏎)" : "Switch to Manual · \(durText) (⏎)")
-        }
         if needsAuth {
-            return locks
-                ? (isZh ? "授权、开始并锁屏 (⏎)" : "Authorize, Start & Lock (⏎)")
-                : (isZh ? "授权并开始保持唤醒 (⏎)" : "Authorize & Start Keeping Awake (⏎)")
+            return isZh ? "授权并开始保持唤醒" : "Authorize & Start"
         }
-        return locks
-            ? (isZh ? "开始并锁屏 (⏎)" : "Start & Lock Screen (⏎)")
-            : (isZh ? "开始保持唤醒 (⏎)" : "Start Keeping Awake (⏎)")
+        return isZh ? "开始保持唤醒" : "Start Keeping Awake"
     }
 
     public var stopButton: String { isZh ? "停止保持唤醒" : "Stop Keeping Awake" }
@@ -488,8 +472,8 @@ public struct L10n {
     }
     public var confirmAutoFollowSwitchDetail: String {
         isZh
-            ? "当前配置下自动跟随不会保持合盖保护（兼容授权模式仅用于手动会话）。确认切回将立即关闭合盖保护并转为 2 小时上限的自动跟随；如需继续合盖，请保留当前手动会话或改用标准免授权合盖方式。"
-            : "Under the current settings, auto-follow will not retain lid-closed protection (admin-authorized compatibility mode is manual-only). Switching disables lid protection immediately and continues in auto-follow (2h cap)."
+            ? "切回后将关闭合盖保护，并转为 2 小时上限的自动跟随"
+            : "Switching disables lid-closed protection and resumes auto-follow (2h cap)"
     }
     public var confirmAutoFollowSwitchButton: String {
         isZh ? "关闭合盖并切回" : "Disable Lid & Switch"

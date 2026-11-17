@@ -638,14 +638,15 @@ struct SleepSkipCoreTests {
         var cfg = SessionConfig(mode: .background, durationMinutes: 60, lockOnStart: false, allowClosedLid: false)
         #expect(!zh.launchConfigSummary(cfg).contains("上次配置"))
         #expect(!en.launchConfigSummary(cfg).contains("Last:"))
-        #expect(zh.startButtonTitle(for: cfg) == "开始保持唤醒 (⏎)")
+        #expect(zh.startButtonTitle(for: cfg) == "开始保持唤醒")
+        #expect(en.startButtonTitle(for: cfg) == "Start Keeping Awake")
         cfg.lockOnStart = true
-        #expect(zh.startButtonTitle(for: cfg) == "开始并锁屏 (⏎)")
-        #expect(en.startButtonTitle(for: cfg) == "Start & Lock Screen (⏎)")
+        #expect(zh.startButtonTitle(for: cfg) == "开始保持唤醒")
+        #expect(en.startButtonTitle(for: cfg) == "Start Keeping Awake")
         cfg.allowClosedLid = true
         cfg.closedLidStrategy = .privileged
-        #expect(zh.startButtonTitle(for: cfg).contains("授权"))
-        #expect(en.startButtonTitle(for: cfg).contains("Authorize"))
+        #expect(zh.startButtonTitle(for: cfg) == "授权并开始保持唤醒")
+        #expect(en.startButtonTitle(for: cfg) == "Authorize & Start")
 
         #expect(zh.autoFollowCeilingLabel("12:00", sourceKind: .hookOnly) != zh.autoFollowCeilingLabel("12:00", sourceKind: .directoryOnly))
         #expect(!zh.autoFollowPolicySummary(.hookOnly).contains("停笔 5 分钟"))

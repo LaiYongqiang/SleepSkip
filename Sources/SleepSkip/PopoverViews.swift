@@ -487,7 +487,7 @@ struct SleepSkipPopoverView: View {
                             .font(.system(size: 11))
                             .accessibilityHidden(true)
                     }
-                    Text(t.startButtonTitle(for: manager.config, isFollowingAgents: manager.isFollowingAgents))
+                    Text(t.startButtonTitle(for: manager.config))
                         .font(.system(size: 13, weight: .semibold))
                 }
                 .foregroundColor(.white)
@@ -703,25 +703,17 @@ struct SleepSkipPopoverView: View {
     // MARK: - Running View
 
     private var runningContent: some View {
-        let isGracePhase = manager.isFollowingAgents && manager.autoFollowGraceEndDate != nil
-        let statusAccent: Color = isGracePhase ? .orange : .green
-        let statusTitle: String = {
-            if manager.isFollowingAgents {
-                return isGracePhase ? t.autoFollowGraceTitle : t.autoFollowActiveTitle
-            }
-            return t.runningTitle
-        }()
         let modeSummary = t.modeTitle(manager.activeMode)
 
         return VStack(spacing: 12) {
             VStack(spacing: 5) {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(statusAccent)
+                        .fill(Color.green)
                         .frame(width: 7, height: 7)
-                    Text(statusTitle)
+                    Text(t.runningTitle)
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(statusAccent)
+                        .foregroundColor(Color.green)
                 }
 
                 if manager.isIndefinite {
@@ -729,40 +721,18 @@ struct SleepSkipPopoverView: View {
                         .font(.system(size: 32, weight: .bold, design: .rounded))
                         .padding(.vertical, 2)
                 } else {
-                    let displaySeconds = isGracePhase ? manager.autoFollowGraceRemainingSeconds : manager.remainingSeconds
-                    Text(DurationFormatter.formatCountdown(displaySeconds))
+                    Text(DurationFormatter.formatCountdown(manager.remainingSeconds))
                         .font(.system(size: 36, weight: .bold, design: .rounded))
                         .monospacedDigit()
                 }
 
                 let lidPart = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
-                if manager.isFollowingAgents {
-                    let agentsText = t.autoFollowAgentsLabel(manager.followingAgents)
-                    let sourceLine = agentsText.isEmpty
-                        ? "\(t.autoFollowBadge) · \(modeSummary)"
-                        : "\(t.autoFollowBadge) · \(agentsText) · \(modeSummary)"
-                    Text(sourceLine)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.blue)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                } else {
-                    Text("\(modeSummary)\(lidPart)")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
-                }
+                Text("\(modeSummary)\(lidPart)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
 
                 if let endDate = manager.endDate, !manager.isIndefinite {
-                    let detailText: String = {
-                        let timeText = DurationFormatter.formatClockTime(endDate)
-                        if manager.isFollowingAgents {
-                            return isGracePhase
-                                ? t.autoFollowGraceDetail(timeText)
-                                : t.autoFollowCeilingLabel(timeText, sourceKind: manager.activeAutoFollowSourceKind)
-                        }
-                        return t.projectedEndLabel(timeText)
-                    }()
-                    Text(detailText)
+                    Text(t.projectedEndLabel(DurationFormatter.formatClockTime(endDate)))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
@@ -773,11 +743,11 @@ struct SleepSkipPopoverView: View {
             .padding(.horizontal, 8)
             .background(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(statusAccent.opacity(0.08))
+                    .fill(Color.green.opacity(0.08))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(statusAccent.opacity(0.22), lineWidth: 1)
+                    .stroke(Color.green.opacity(0.22), lineWidth: 1)
             )
 
             VStack(alignment: .leading, spacing: 6) {
@@ -804,92 +774,65 @@ struct SleepSkipPopoverView: View {
                 }
                 .background(cardBackground(selected: manager.activeMode == .keepDisplay))
                 .overlay(cardBorder(selected: manager.activeMode == .keepDisplay))
-
-                if manager.isFollowingAgents {
-                    Text(t.modeSwitchAutoFollowNote)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
 
-            if manager.isFollowingAgents {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(t.autoFollowPolicySummary(manager.activeAutoFollowSourceKind))
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text(t.currentSettingLabel(DurationFormatter.formatDuration(manager.initialMinutes, isChinese: t.isZh)))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    let manualDurationText = DurationFormatter.formatDuration(
-                        manager.config.durationMinutes,
-                        isChinese: t.isZh
-                    )
-                    Button(t.switchToManualButton(manualDurationText)) {
-                        manager.promoteAutoFollowToManual()
+                    Spacer()
+                    if !manager.isIndefinite {
+                        Button(t.extend30mButton) {
+                            manager.extendSession(byMinutes: 30)
+                        }
+                        .buttonStyle(BorderedButtonStyle())
+                        .controlSize(.small)
                     }
-                    .buttonStyle(LinkButtonStyle())
-                    .font(.system(size: 11))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(t.currentSettingLabel(DurationFormatter.formatDuration(manager.initialMinutes, isChinese: t.isZh)))
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        if !manager.isIndefinite {
-                            Button(t.extend30mButton) {
-                                manager.extendSession(byMinutes: 30)
-                            }
-                            .buttonStyle(BorderedButtonStyle())
-                            .controlSize(.small)
-                        }
-                    }
 
-                    if manager.canSwitchToAutoFollow {
-                        if manager.pendingAutoFollowSwitchConfirmation {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(t.confirmAutoFollowSwitchTitle)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(.primary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Text(t.confirmAutoFollowSwitchDetail)
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                HStack(spacing: 8) {
-                                    Button(t.confirmAutoFollowSwitchButton) {
-                                        manager.switchManualToAutoFollow()
-                                    }
-                                    .buttonStyle(BorderedButtonStyle())
-                                    .controlSize(.small)
-                                    .tint(.orange)
-
-                                    Button(t.keepClosedLidSessionButton) {
-                                        manager.cancelSwitchToAutoFollow()
-                                    }
-                                    .buttonStyle(BorderedButtonStyle())
-                                    .controlSize(.small)
+                if manager.canSwitchToAutoFollow {
+                    if manager.pendingAutoFollowSwitchConfirmation {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(t.confirmAutoFollowSwitchTitle)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.primary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(t.confirmAutoFollowSwitchDetail)
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 8) {
+                                Button(t.confirmAutoFollowSwitchButton) {
+                                    manager.switchManualToAutoFollow()
                                 }
+                                .buttonStyle(BorderedButtonStyle())
+                                .controlSize(.small)
+                                .tint(.orange)
+
+                                Button(t.keepClosedLidSessionButton) {
+                                    manager.cancelSwitchToAutoFollow()
+                                }
+                                .buttonStyle(BorderedButtonStyle())
+                                .controlSize(.small)
                             }
-                            .padding(9)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(Color.orange.opacity(0.1))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color.orange.opacity(0.28), lineWidth: 1)
-                            )
-                        } else {
-                            Button(t.returnToAutoFollowButton(dropsClosedLid: manager.dropsClosedLidOnAutoFollowSwitch)) {
-                                manager.requestSwitchManualToAutoFollow()
-                            }
-                            .buttonStyle(LinkButtonStyle())
-                            .font(.system(size: 11))
                         }
+                        .padding(9)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.orange.opacity(0.1))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.orange.opacity(0.28), lineWidth: 1)
+                        )
+                    } else {
+                        Button(t.returnToAutoFollowButton(dropsClosedLid: manager.dropsClosedLidOnAutoFollowSwitch)) {
+                            manager.requestSwitchManualToAutoFollow()
+                        }
+                        .buttonStyle(LinkButtonStyle())
+                        .font(.system(size: 11))
                     }
                 }
             }
@@ -941,23 +884,6 @@ struct SleepSkipPopoverView: View {
                         Text(t.lockScreenButton)
                             .font(.system(size: 12))
                     }
-                }
-                .buttonStyle(PlainButtonStyle())
-
-                Spacer()
-
-                Button(action: {
-                    manager.stopSession(reason: .silent)
-                    NSApp.terminate(nil)
-                }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "rectangle.portrait.and.arrow.right")
-                            .font(.system(size: 11))
-                            .accessibilityHidden(true)
-                        Text(t.quitButton)
-                            .font(.system(size: 12))
-                    }
-                    .foregroundColor(.secondary)
                 }
                 .buttonStyle(PlainButtonStyle())
             }
@@ -1069,13 +995,6 @@ struct SleepSkipPopoverView: View {
                 .font(.system(size: 11))
 
                 Spacer()
-
-                Button(t.quitButton) {
-                    manager.stopSession(reason: .silent)
-                    NSApp.terminate(nil)
-                }
-                .buttonStyle(BorderedButtonStyle())
-                .controlSize(.small)
 
                 Button(t.backButton) {
                     manager.showSettings = false
