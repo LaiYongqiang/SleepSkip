@@ -12,7 +12,6 @@ public struct L10n {
     public var runningBadge: String { isZh ? "运行中" : "Active" }
     public var backpackBadge: String { isZh ? "合盖运行中" : "Lid-Closed" }
     public var authorizingBadge: String { isZh ? "等待授权" : "Authorizing" }
-    public var pausedBadge: String { isZh ? "已暂停" : "Paused" }
 
     public var notRunningTitle: String { isZh ? "空闲待命" : "Idle" }
     public func idleWatchingSourcesSummary(_ count: Int) -> String {
@@ -109,6 +108,7 @@ public struct L10n {
     public var modeRecommendedBadge: String { isZh ? "省电推荐" : "Battery Saver" }
     public var modeTipBackground: String { isZh ? "续航最优" : "Best battery" }
     public var modeTipDisplay: String { isZh ? "建议调暗亮度" : "Lower brightness to save power" }
+    public var modeRowsFollowStateHint: String { isZh ? "转为手动后生效" : "Applies after switching to manual" }
 
     public var lockOnStartLabel: String { isZh ? "启动即锁屏" : "Lock on start" }
     public var closedLidLabel: String { isZh ? "合盖继续运行" : "Lid-closed" }
@@ -456,16 +456,6 @@ public struct L10n {
     public var autoFollowActiveTitle: String { isZh ? "Agent 运行中，正在保持唤醒" : "Keeping Awake for Agent" }
     public var autoFollowGraceTitle: String { isZh ? "目录已停笔，即将自动释放" : "Agent Quiet · Releasing Soon" }
 
-    public var modeSwitchAutoFollowNote: String {
-        isZh
-            ? "切换仅改变是否息屏，仍按自动跟随规则释放"
-            : "Changes display sleep only; auto-follow release still applies"
-    }
-    public func switchToManualButton(_ durationText: String) -> String {
-        isZh
-            ? "转为手动计时（\(durationText)，不随 Agent 释放）"
-            : "Take Over as Manual (\(durationText), ignores agent stop)"
-    }
     public func returnToAutoFollowButton(dropsClosedLid: Bool) -> String {
         if dropsClosedLid {
             return isZh ? "切回自动跟随（将关闭合盖保护）" : "Return to Auto-Follow (disables lid-closed)"

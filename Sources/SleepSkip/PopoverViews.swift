@@ -335,9 +335,15 @@ struct SleepSkipPopoverView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.secondary)
                     Spacer()
-                    Text(manager.config.mode == .background ? t.modeTipBackground : t.modeTipDisplay)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
+                    if manager.popoverScene == .following {
+                        Text(t.modeRowsFollowStateHint)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text(manager.config.mode == .background ? t.modeTipBackground : t.modeTipDisplay)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 VStack(spacing: 0) {
@@ -841,7 +847,7 @@ struct SleepSkipPopoverView: View {
                             .fill(Color.red)
                             .frame(width: 9, height: 9)
                             .accessibilityHidden(true)
-                        Text(manager.isFollowingAgents ? t.autoFollowStopButton : t.stopButton)
+                        Text(t.stopButton)
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.red)
                     }
@@ -913,11 +919,13 @@ struct SleepSkipPopoverView: View {
         }()
         let subtitle: String = {
             let mode = t.modeTitle(manager.activeMode)
+            let lidSuffix = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
             if manager.isFollowingAgents {
                 let agents = t.autoFollowAgentsLabel(manager.followingAgents)
-                return agents.isEmpty ? "\(t.autoFollowBadge) · \(mode)" : "\(agents) · \(mode)"
+                let base = agents.isEmpty ? "\(t.autoFollowBadge) · \(mode)" : "\(agents) · \(mode)"
+                return "\(base)\(lidSuffix)"
             }
-            return mode
+            return "\(mode)\(lidSuffix)"
         }()
 
         return HStack(spacing: 8) {
@@ -1434,7 +1442,17 @@ struct SleepSkipPopoverView: View {
             if case .holding = hookStatus { return true }
             return false
         }()
-        let statusColor: Color = isHolding ? .blue : .secondary
+        let statusColor: Color = {
+            switch hookStatus {
+            case .holding:
+                return .blue
+            // Waiting for an authorization the user must grant: an actionable state, not a gray one.
+            case .waitingForAuthorization(let existing) where existing == .none:
+                return .orange
+            default:
+                return .secondary
+            }
+        }()
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
