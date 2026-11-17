@@ -655,6 +655,43 @@ struct SleepSkipCoreTests {
         #expect(en.closedLidInlineNote(strategy: .unprivileged).contains("6–9"))
     }
 
+    @Test func buttonTitlesStayWithinBudgetAndStartButtonStaysShortcutFree() {
+        let zh = L10n(language: .zhHans)
+        let en = L10n(language: .en)
+
+        // 按钮类标题预算：中文 ≤14 字、英文 ≤28 字符。
+        let zhBudgetTitles = [zh.stopButton, zh.autoFollowStopButton, zh.confirmAutoFollowSwitchButton, zh.keepClosedLidSessionButton]
+        for title in zhBudgetTitles {
+            #expect(title.count <= 14, "zh button title exceeds 14 chars: \(title)")
+        }
+        let enBudgetTitles = [en.stopButton, en.autoFollowStopButton, en.confirmAutoFollowSwitchButton, en.keepClosedLidSessionButton]
+        for title in enBudgetTitles {
+            #expect(title.count <= 28, "en button title exceeds 28 chars: \(title)")
+        }
+
+        // 确认弹窗详情中文 ≤40 字符。
+        #expect(zh.confirmAutoFollowSwitchDetail.count <= 40, "confirm detail exceeds 40 chars: \(zh.confirmAutoFollowSwitchDetail)")
+
+        // startButtonTitle 在任何配置组合下都不得重新长出 ⏎ 提示或文件路径字符。
+        for mode in GuardMode.allCases {
+            for lockOnStart in [false, true] {
+                for allowClosedLid in [false, true] {
+                    for strategy in ClosedLidStrategy.allCases {
+                        var cfg = SessionConfig(mode: mode, durationMinutes: 60, lockOnStart: lockOnStart, allowClosedLid: allowClosedLid)
+                        cfg.closedLidStrategy = strategy
+                        for l10n in [zh, en] {
+                            let title = l10n.startButtonTitle(for: cfg)
+                            #expect(!title.contains("⏎"), "start button must not embed the return-key hint: \(title)")
+                            #expect(!title.contains("~/"), "start button must not contain path characters: \(title)")
+                            let budget = l10n.isZh ? 14 : 28
+                            #expect(title.count <= budget, "start button title exceeds budget: \(title)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @Test func autoFollowDoesNotOverrideAManualSession() throws {
         let caf = MockCaffeinateRunner()
         let (manager, defaults, suite) = try makeManager(caf: caf)
