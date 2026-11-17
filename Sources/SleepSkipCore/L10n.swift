@@ -111,7 +111,7 @@ public struct L10n {
     public var modeTipDisplay: String { isZh ? "建议调暗亮度" : "Lower brightness to save power" }
 
     public var lockOnStartLabel: String { isZh ? "启动即锁屏" : "Lock on start" }
-    public var closedLidLabel: String { isZh ? "合盖继续运行（实验性）" : "Lid-closed (experimental)" }
+    public var closedLidLabel: String { isZh ? "合盖继续运行" : "Lid-closed" }
     public func closedLidInlineNote(strategy: ClosedLidStrategy) -> String {
         switch strategy {
         case .unprivileged:

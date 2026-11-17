@@ -1007,76 +1007,7 @@ struct SleepSkipPopoverView: View {
                     .padding(10)
                     .background(settingsCardBackground)
 
-                    // 2. Claude Code Hook card (always visible and independent)
-                    VStack(alignment: .leading, spacing: 8) {
-                        claudeHookSection
-                    }
-                    .padding(10)
-                    .background(settingsCardBackground)
-
-                    // 3. General card
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(t.generalSectionTitle)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.secondary)
-
-                        HStack {
-                            Text(t.launchAtLoginLabel)
-                                .font(.system(size: 12))
-                            Spacer()
-                            Toggle("", isOn: Binding(
-                                get: { manager.launchAtLogin },
-                                set: { manager.toggleLaunchAtLogin($0) }
-                            ))
-                            .labelsHidden()
-                            .toggleStyle(SwitchToggleStyle())
-                            .controlSize(.small)
-                            .accessibilityLabel(t.launchAtLoginLabel)
-                        }
-
-                        Divider()
-
-                        HStack {
-                            Text(t.globalShortcutLabel)
-                                .font(.system(size: 12))
-                            Spacer()
-                            Toggle("", isOn: Binding(
-                                get: { manager.config.globalShortcutEnabled },
-                                set: { manager.setGlobalShortcutEnabled($0) }
-                            ))
-                            .labelsHidden()
-                            .toggleStyle(SwitchToggleStyle())
-                            .controlSize(.small)
-                            .accessibilityLabel(t.globalShortcutLabel)
-                        }
-
-                        Divider()
-
-                        cliInstallSection
-
-                        Divider()
-
-                        HStack {
-                            Text(t.languageLabel)
-                                .font(.system(size: 12))
-                            Spacer()
-                            Picker("", selection: Binding(
-                                get: { manager.config.language },
-                                set: { manager.setLanguage($0) }
-                            )) {
-                                Text(t.languageSystem).tag(AppLanguage.system)
-                                Text("中文").tag(AppLanguage.zhHans)
-                                Text("English").tag(AppLanguage.en)
-                            }
-                            .labelsHidden()
-                            .frame(width: 120)
-                            .accessibilityLabel(t.languageLabel)
-                        }
-                    }
-                    .padding(10)
-                    .background(settingsCardBackground)
-
-                    // 4. Power, Thermal & Lid card (flat, no nested disclosure)
+                    // 2. Power, Thermal & Lid card (flat, no nested disclosure)
                     VStack(alignment: .leading, spacing: 8) {
                         Text(t.powerAndLidSectionTitle)
                             .font(.system(size: 11, weight: .semibold))
@@ -1145,6 +1076,75 @@ struct SleepSkipPopoverView: View {
                         Divider()
 
                         lidStrategyPicker(manager: manager, t: t)
+                    }
+                    .padding(10)
+                    .background(settingsCardBackground)
+
+                    // 3. Claude Code Hook card (always visible and independent)
+                    VStack(alignment: .leading, spacing: 8) {
+                        claudeHookSection
+                    }
+                    .padding(10)
+                    .background(settingsCardBackground)
+
+                    // 4. General card
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(t.generalSectionTitle)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.secondary)
+
+                        HStack {
+                            Text(t.launchAtLoginLabel)
+                                .font(.system(size: 12))
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { manager.launchAtLogin },
+                                set: { manager.toggleLaunchAtLogin($0) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(SwitchToggleStyle())
+                            .controlSize(.small)
+                            .accessibilityLabel(t.launchAtLoginLabel)
+                        }
+
+                        Divider()
+
+                        HStack {
+                            Text(t.globalShortcutLabel)
+                                .font(.system(size: 12))
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { manager.config.globalShortcutEnabled },
+                                set: { manager.setGlobalShortcutEnabled($0) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(SwitchToggleStyle())
+                            .controlSize(.small)
+                            .accessibilityLabel(t.globalShortcutLabel)
+                        }
+
+                        Divider()
+
+                        cliInstallSection
+
+                        Divider()
+
+                        HStack {
+                            Text(t.languageLabel)
+                                .font(.system(size: 12))
+                            Spacer()
+                            Picker("", selection: Binding(
+                                get: { manager.config.language },
+                                set: { manager.setLanguage($0) }
+                            )) {
+                                Text(t.languageSystem).tag(AppLanguage.system)
+                                Text("中文").tag(AppLanguage.zhHans)
+                                Text("English").tag(AppLanguage.en)
+                            }
+                            .labelsHidden()
+                            .frame(width: 120)
+                            .accessibilityLabel(t.languageLabel)
+                        }
                     }
                     .padding(10)
                     .background(settingsCardBackground)
