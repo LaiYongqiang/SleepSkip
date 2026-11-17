@@ -158,9 +158,20 @@ public struct L10n {
     public var minutesUnit: String { isZh ? "分钟" : "min" }
     public var applyButton: String { isZh ? "应用" : "Apply" }
 
-    public func startButtonTitle(for config: SessionConfig) -> String {
+    public func startButtonTitle(for config: SessionConfig, isFollowingAgents: Bool = false) -> String {
         let needsAuth = config.effectiveAllowClosedLid && config.closedLidStrategy == .privileged
         let locks = config.effectiveLockOnStart
+        if isFollowingAgents {
+            let durText = DurationFormatter.formatDuration(config.durationMinutes, isChinese: isZh)
+            if needsAuth {
+                return locks
+                    ? (isZh ? "授权、转为手动并锁屏 · \(durText) (⏎)" : "Authorize, Switch & Lock · \(durText) (⏎)")
+                    : (isZh ? "授权并转为手动计时 · \(durText) (⏎)" : "Authorize & Switch to Manual · \(durText) (⏎)")
+            }
+            return locks
+                ? (isZh ? "转为手动并锁屏 · \(durText) (⏎)" : "Switch to Manual & Lock · \(durText) (⏎)")
+                : (isZh ? "转为手动计时 · \(durText) (⏎)" : "Switch to Manual · \(durText) (⏎)")
+        }
         if needsAuth {
             return locks
                 ? (isZh ? "授权、开始并锁屏 (⏎)" : "Authorize, Start & Lock (⏎)")
@@ -477,8 +488,8 @@ public struct L10n {
     }
     public var confirmAutoFollowSwitchDetail: String {
         isZh
-            ? "自动跟随不支持合盖运行。确认切回将立即关闭合盖保护并转为 2 小时上限的后台自动跟随；如需继续合盖，请保留当前手动会话。"
-            : "Auto-follow does not support lid-closed mode. Switching disables lid protection immediately and continues in background auto-follow (2h cap). Keep this manual session to stay lid-closed."
+            ? "当前配置下自动跟随不会保持合盖保护（兼容授权模式仅用于手动会话）。确认切回将立即关闭合盖保护并转为 2 小时上限的自动跟随；如需继续合盖，请保留当前手动会话或改用标准免授权合盖方式。"
+            : "Under the current settings, auto-follow will not retain lid-closed protection (admin-authorized compatibility mode is manual-only). Switching disables lid protection immediately and continues in auto-follow (2h cap)."
     }
     public var confirmAutoFollowSwitchButton: String {
         isZh ? "关闭合盖并切回" : "Disable Lid & Switch"

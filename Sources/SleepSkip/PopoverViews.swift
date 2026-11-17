@@ -72,7 +72,7 @@ struct SleepSkipPopoverView: View {
                 autoFollowNotice
             }
 
-            if manager.isRunning {
+            if manager.isRunning && !manager.isFollowingAgents {
                 runningContent
             } else {
                 idleContent
@@ -97,7 +97,10 @@ struct SleepSkipPopoverView: View {
                 statusBadge(t.authorizingBadge, color: .orange)
             } else if manager.isFollowingAgents {
                 // Auto-follow reads as a different thing from a session the user started.
-                statusBadge(t.autoFollowBadge, color: .blue)
+                statusBadge(
+                    manager.activeClosedLid ? "\(t.autoFollowBadge) · \(t.backpackBadge)" : t.autoFollowBadge,
+                    color: .blue
+                )
             } else if manager.isRunning {
                 statusBadge(manager.activeClosedLid ? t.backpackBadge : t.runningBadge, color: .green)
             } else if manager.autoFollowSuppressed {
@@ -484,7 +487,7 @@ struct SleepSkipPopoverView: View {
                             .font(.system(size: 11))
                             .accessibilityHidden(true)
                     }
-                    Text(t.startButtonTitle(for: manager.config))
+                    Text(t.startButtonTitle(for: manager.config, isFollowingAgents: manager.isFollowingAgents))
                         .font(.system(size: 13, weight: .semibold))
                 }
                 .foregroundColor(.white)
@@ -506,7 +509,9 @@ struct SleepSkipPopoverView: View {
         let hasFolders = !manager.agentSources.isEmpty
         let hookOn = manager.claudeHookConnected
 
-        if manager.autoFollowSuppressed {
+        if manager.isFollowingAgents {
+            autoFollowStatusCard
+        } else if manager.autoFollowSuppressed {
             VStack(spacing: 6) {
                 HStack(spacing: 6) {
                     Circle()
@@ -625,6 +630,74 @@ struct SleepSkipPopoverView: View {
                     .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
             )
         }
+    }
+
+    private var autoFollowStatusCard: some View {
+        let isGracePhase = manager.autoFollowGraceEndDate != nil
+        let statusAccent: Color = isGracePhase ? .orange : .green
+        let statusTitle = isGracePhase ? t.autoFollowGraceTitle : t.autoFollowActiveTitle
+        let displaySeconds = isGracePhase ? manager.autoFollowGraceRemainingSeconds : manager.remainingSeconds
+        let modeSummary = t.modeTitle(manager.activeMode)
+        let lidPart = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
+        let agentsText = t.autoFollowAgentsLabel(manager.followingAgents)
+        let sourceLine = agentsText.isEmpty
+            ? "\(t.autoFollowBadge) · \(modeSummary)\(lidPart)"
+            : "\(t.autoFollowBadge) · \(agentsText) · \(modeSummary)\(lidPart)"
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusAccent)
+                    .frame(width: 7, height: 7)
+                Text(statusTitle)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(statusAccent)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(DurationFormatter.formatCountdown(displaySeconds))
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(.primary)
+            }
+
+            Text(sourceLine)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.blue)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 8) {
+                if let endDate = manager.endDate {
+                    let timeText = DurationFormatter.formatClockTime(endDate)
+                    let detailText = isGracePhase
+                        ? t.autoFollowGraceDetail(timeText)
+                        : t.autoFollowCeilingLabel(timeText, sourceKind: manager.activeAutoFollowSourceKind)
+                    Text(detailText)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 4)
+                Button(t.autoFollowStopButton) {
+                    manager.stopSession(reason: .manual)
+                }
+                .buttonStyle(BorderedButtonStyle())
+                .controlSize(.small)
+                .tint(.red)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(statusAccent.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(statusAccent.opacity(0.22), lineWidth: 1)
+        )
     }
 
     // MARK: - Running View
@@ -811,7 +884,7 @@ struct SleepSkipPopoverView: View {
                                     .stroke(Color.orange.opacity(0.28), lineWidth: 1)
                             )
                         } else {
-                            Button(t.returnToAutoFollowButton(dropsClosedLid: manager.activeClosedLid)) {
+                            Button(t.returnToAutoFollowButton(dropsClosedLid: manager.dropsClosedLidOnAutoFollowSwitch)) {
                                 manager.requestSwitchManualToAutoFollow()
                             }
                             .buttonStyle(LinkButtonStyle())
@@ -919,11 +992,13 @@ struct SleepSkipPopoverView: View {
         }()
         let subtitle: String = {
             let mode = t.modeTitle(manager.activeMode)
+            let lidSuffix = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
             if manager.isFollowingAgents {
                 let agents = t.autoFollowAgentsLabel(manager.followingAgents)
-                return agents.isEmpty ? "\(t.autoFollowBadge) · \(mode)" : "\(agents) · \(mode)"
+                let base = agents.isEmpty ? "\(t.autoFollowBadge) · \(mode)" : "\(agents) · \(mode)"
+                return "\(base)\(lidSuffix)"
             }
-            return manager.activeClosedLid ? "\(mode) · \(t.backpackBadge)" : mode
+            return "\(mode)\(lidSuffix)"
         }()
 
         return HStack(spacing: 8) {

@@ -1558,8 +1558,51 @@ struct SleepSkipCoreTests {
             #expect(manager.isFollowingAgents)
         }
 
-        // 2. Standard (unprivileged) and Compatibility (privileged) closed-lid sessions require confirmation
-        // and preserve lid protection on cancel or caffeinate failure.
+        // 2. Standard (unprivileged) mode with allowClosedLid enabled engages lid protection in
+        // auto-follow, toggles live, and switches between manual and auto-follow without dropping lid guard.
+        do {
+            let caf = MockCaffeinateRunner()
+            let bag = MockBackpackGuard()
+            let lid = MockLidGuard()
+            let suite = "ss.lidswitch.unpriv.keep.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let manager = SessionManager(
+                store: PreferencesStore(defaults: defaults),
+                caffeinateRunner: caf,
+                backpackGuard: bag,
+                unprivilegedLidGuard: lid,
+                powerMonitor: MockPowerMonitor(),
+                screenLocker: MockScreenLocker(),
+                notifier: MockNotifier(),
+                loginItem: MockLoginItem(),
+                checkStaleSleepOnInit: false
+            )
+            manager.setClosedLidStrategy(.unprivileged)
+            manager.setAllowClosedLid(true)
+            manager.setAutoFollowEnabled(true)
+            manager.agentTracker.recordActivity(sourceID: "codex")
+            manager.handleAgentActivity(manager.agentTracker.evaluate())
+            #expect(manager.isFollowingAgents && manager.activeClosedLid && lid.isEngaged)
+
+            // Live toggle during auto-follow immediately updates the unprivileged lid guard.
+            manager.setAllowClosedLid(false)
+            #expect(!manager.activeClosedLid && !lid.isEngaged)
+            manager.setAllowClosedLid(true)
+            #expect(manager.activeClosedLid && lid.isEngaged)
+
+            // Promoting to manual and switching back to auto-follow preserves unprivileged lid guard without confirmation.
+            manager.startConfiguredSession()
+            #expect(manager.isRunning && !manager.isFollowingAgents && manager.activeClosedLid && lid.isEngaged)
+            #expect(!manager.dropsClosedLidOnAutoFollowSwitch)
+            manager.requestSwitchManualToAutoFollow()
+            #expect(!manager.pendingAutoFollowSwitchConfirmation)
+            #expect(manager.isFollowingAgents && manager.activeClosedLid && lid.isEngaged)
+        }
+
+        // 3. When switching to auto-follow drops lid protection (Compatibility privileged mode, or
+        // Standard mode after unchecking allowClosedLid), confirmation is required and protection
+        // is preserved on cancel or caffeinate failure.
         for strategy in [ClosedLidStrategy.unprivileged, ClosedLidStrategy.privileged] {
             let caf = MockCaffeinateRunner()
             let bag = MockBackpackGuard()
@@ -1583,8 +1626,12 @@ struct SleepSkipCoreTests {
             manager.setClosedLidStrategy(strategy)
             manager.setAllowClosedLid(true)
             manager.startConfiguredSession()
+            if strategy == .unprivileged {
+                manager.setAllowClosedLid(false)
+            }
             #expect(manager.isRunning && manager.activeClosedLid)
             #expect(manager.canSwitchToAutoFollow)
+            #expect(manager.dropsClosedLidOnAutoFollowSwitch)
             let isProtected: () -> Bool = { strategy == .unprivileged ? lid.isEngaged : bag.enabled }
             #expect(isProtected())
 

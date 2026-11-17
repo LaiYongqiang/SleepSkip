@@ -607,7 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 if self.sessionManager.isAuthorizing {
                     return nil
                 }
-                if self.sessionManager.isRunning {
+                if self.sessionManager.isRunning && !self.sessionManager.isFollowingAgents {
                     self.closePopover()
                 } else {
                     self.sessionManager.startConfiguredSession()
@@ -754,6 +754,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             let cancelItem = NSMenuItem(title: t.cancelLaunchButton, action: #selector(menuCancelAuthorization), keyEquivalent: "")
             cancelItem.target = self
             menu.addItem(cancelItem)
+        } else if sessionManager.isFollowingAgents {
+            let startItem = NSMenuItem(title: t.menuQuickStart, action: #selector(menuQuickStart), keyEquivalent: "")
+            startItem.target = self
+            menu.addItem(startItem)
+
+            let stopItem = NSMenuItem(title: t.autoFollowStopButton, action: #selector(menuStop), keyEquivalent: "")
+            stopItem.target = self
+            menu.addItem(stopItem)
         } else if sessionManager.isRunning {
             let stopItem = NSMenuItem(title: t.menuStop, action: #selector(menuStop), keyEquivalent: "")
             stopItem.target = self
