@@ -66,6 +66,14 @@ public enum CLIInstallStatus: Equatable, Sendable {
     case unavailable
 }
 
+/// The three scenes the popover can show. `isAuthorizing` and `externalCLI` render as banners on
+/// top of any scene; `autoFollowSuppressed` is presentation inside the scene that owns the state.
+public enum PopoverScene: Equatable, Sendable {
+    case idle
+    case manualRunning
+    case following
+}
+
 public protocol CLIInstalling: AnyObject {
     func currentStatus() -> CLIInstallStatus
     func install(completion: @escaping (Result<String, Error>) -> Void)
@@ -177,6 +185,14 @@ public final class SessionManager: ObservableObject {
 
     public var isEffectivelyActive: Bool {
         isRunning || externalCLI != nil
+    }
+
+    /// Single source of truth for which scene the popover shows, derived only from
+    /// `isRunning` / `isFollowingAgents`.
+    public var popoverScene: PopoverScene {
+        if isRunning && isFollowingAgents { return .following }
+        if isRunning { return .manualRunning }
+        return .idle
     }
 
     public var isAutoFollowEnabled: Bool {

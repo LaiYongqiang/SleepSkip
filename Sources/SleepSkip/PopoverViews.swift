@@ -72,9 +72,10 @@ struct SleepSkipPopoverView: View {
                 autoFollowNotice
             }
 
-            if manager.isRunning && !manager.isFollowingAgents {
+            switch manager.popoverScene {
+            case .manualRunning:
                 runningContent
-            } else {
+            case .idle, .following:
                 idleContent
             }
         }
@@ -95,18 +96,16 @@ struct SleepSkipPopoverView: View {
 
             if manager.isAuthorizing {
                 statusBadge(t.authorizingBadge, color: .orange)
-            } else if manager.isFollowingAgents {
+            } else {
                 // Auto-follow reads as a different thing from a session the user started.
-                statusBadge(
-                    manager.activeClosedLid ? "\(t.autoFollowBadge) · \(t.backpackBadge)" : t.autoFollowBadge,
-                    color: .blue
-                )
-            } else if manager.isRunning {
-                statusBadge(manager.activeClosedLid ? t.backpackBadge : t.runningBadge, color: .green)
-            } else if manager.autoFollowSuppressed {
-                statusBadge(t.pausedBadge, color: .orange)
-            } else if manager.externalCLI != nil {
-                statusBadge("CLI", color: .blue)
+                switch manager.popoverScene {
+                case .following:
+                    statusBadge(t.autoFollowBadge, color: .blue)
+                case .manualRunning:
+                    statusBadge(t.runningBadge, color: .green)
+                case .idle:
+                    EmptyView()
+                }
             }
 
             Spacer()
@@ -324,7 +323,11 @@ struct SleepSkipPopoverView: View {
 
     private var idleContent: some View {
         VStack(spacing: 12) {
-            idleStatusCard
+            if manager.popoverScene == .following {
+                autoFollowStatusCard
+            } else {
+                idleStatusCard
+            }
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -509,51 +512,7 @@ struct SleepSkipPopoverView: View {
         let hasFolders = !manager.agentSources.isEmpty
         let hookOn = manager.claudeHookConnected
 
-        if manager.isFollowingAgents {
-            autoFollowStatusCard
-        } else if manager.autoFollowSuppressed {
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 7, height: 7)
-                    Text(manager.autoFollowLimitReached ? t.autoFollowLimitTitle : t.autoFollowPausedTitle)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.primary)
-                }
-                Text(t.autoFollowPausedDetail(
-                    sourceKind: manager.activeAutoFollowSourceKind,
-                    limitReached: manager.autoFollowLimitReached
-                ))
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 10)
-
-                Button(t.resumeAutoFollowButton) {
-                    manager.resumeAutoFollow()
-                }
-                .buttonStyle(BorderedButtonStyle())
-                .controlSize(.small)
-
-                Text(t.launchConfigSummary(manager.config))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color.orange.opacity(0.08))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .stroke(Color.orange.opacity(0.24), lineWidth: 1)
-            )
-        } else if watchFoldersOn && !hasFolders && !hookOn {
+        if watchFoldersOn && !hasFolders && !hookOn {
             VStack(spacing: 6) {
                 HStack(spacing: 6) {
                     Circle()
@@ -595,41 +554,73 @@ struct SleepSkipPopoverView: View {
                     .stroke(Color.orange.opacity(0.22), lineWidth: 1)
             )
         } else {
-            let statusMeta: (title: String, dotColor: Color, primary: Bool) = {
-                if watchFoldersOn && hasFolders && hookOn {
-                    return (t.idleFoldersAndHookTitle, .blue, true)
-                }
-                if watchFoldersOn && hasFolders {
-                    return (t.idleFoldersOnlyTitle, .blue, true)
-                }
-                if hookOn {
-                    return (t.idleHookOnlyTitle, .blue, true)
-                }
-                return (t.notRunningTitle, Color.secondary.opacity(0.45), false)
-            }()
-
-            VStack(spacing: 4) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusMeta.dotColor.opacity(statusMeta.primary ? 0.85 : 1.0))
-                        .frame(width: 7, height: 7)
-                    Text(statusMeta.title)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(statusMeta.primary ? .primary : .secondary)
-                }
-                Text(t.launchConfigSummary(manager.config))
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 11)
-            .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
-            )
+            idleStandbyCard(watchFoldersOn: watchFoldersOn, hasFolders: hasFolders, hookOn: hookOn)
         }
+    }
+
+    /// The calm standby card. Suppressed auto-follow is presented inside this card rather than as
+    /// a separate scene.
+    private func idleStandbyCard(watchFoldersOn: Bool, hasFolders: Bool, hookOn: Bool) -> some View {
+        let suppressed = manager.autoFollowSuppressed
+        let hasSources = (watchFoldersOn && hasFolders) || hookOn
+        let accent: Color = suppressed ? .orange : (hasSources ? .blue : Color.secondary.opacity(0.45))
+        let title = suppressed
+            ? (manager.autoFollowLimitReached ? t.autoFollowLimitTitle : t.autoFollowPausedTitle)
+            : t.notRunningTitle
+        let summary: String = {
+            var parts: [String] = []
+            if watchFoldersOn && hasFolders {
+                parts.append(t.idleWatchingSourcesSummary(manager.agentSources.count))
+            }
+            if hookOn {
+                parts.append(t.idleHookReadySummary)
+            }
+            return parts.isEmpty ? t.launchConfigSummary(manager.config) : parts.joined(separator: " · ")
+        }()
+
+        return VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 7, height: 7)
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(suppressed || hasSources ? .primary : .secondary)
+            }
+            Text(summary)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if suppressed {
+                Text(t.autoFollowPausedDetail(
+                    sourceKind: manager.activeAutoFollowSourceKind,
+                    limitReached: manager.autoFollowLimitReached
+                ))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10)
+
+                Button(t.resumeAutoFollowButton) {
+                    manager.resumeAutoFollow()
+                }
+                .buttonStyle(BorderedButtonStyle())
+                .controlSize(.small)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, suppressed ? 10 : 11)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(suppressed ? Color.orange.opacity(0.08) : Color(NSColor.controlBackgroundColor).opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(Color.orange.opacity(suppressed ? 0.24 : 0), lineWidth: 1)
+        )
     }
 
     private var autoFollowStatusCard: some View {
@@ -918,13 +909,11 @@ struct SleepSkipPopoverView: View {
         }()
         let subtitle: String = {
             let mode = t.modeTitle(manager.activeMode)
-            let lidSuffix = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
             if manager.isFollowingAgents {
                 let agents = t.autoFollowAgentsLabel(manager.followingAgents)
-                let base = agents.isEmpty ? "\(t.autoFollowBadge) · \(mode)" : "\(agents) · \(mode)"
-                return "\(base)\(lidSuffix)"
+                return agents.isEmpty ? "\(t.autoFollowBadge) · \(mode)" : "\(agents) · \(mode)"
             }
-            return "\(mode)\(lidSuffix)"
+            return mode
         }()
 
         return HStack(spacing: 8) {
@@ -1437,20 +1426,11 @@ struct SleepSkipPopoverView: View {
 
     private var claudeHookSection: some View {
         let hookStatus = manager.hookProtectionStatus
-        let statusColor: Color = {
-            switch hookStatus {
-            case .none: return .secondary
-            case .holding: return .blue
-            case .paused: return .orange
-            case .standbyBehindManual: return .secondary
-            case .waitingForAuthorization(let existing):
-                switch existing {
-                case .none: return .orange
-                case .manual: return .secondary
-                case .autoFollow: return .blue
-                }
-            }
+        let isHolding: Bool = {
+            if case .holding = hookStatus { return true }
+            return false
         }()
+        let statusColor: Color = isHolding ? .blue : .secondary
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -1458,9 +1438,10 @@ struct SleepSkipPopoverView: View {
                     .font(.system(size: 12, weight: .semibold))
                 statusBadge(t.claudeHookIndependentBadge, color: .secondary)
                 Spacer()
-                if let badge = t.claudeHookStatusBadge(hookStatus) {
-                    statusBadge(badge, color: statusColor)
-                }
+                statusBadge(
+                    isHolding ? t.claudeHookHoldingBadge : t.claudeHookNotHoldingBadge,
+                    color: statusColor
+                )
             }
 
             HStack {
@@ -1485,7 +1466,7 @@ struct SleepSkipPopoverView: View {
                 HStack(spacing: 6) {
                     Text(detail)
                         .font(.system(size: 11))
-                        .foregroundColor(statusColor == .orange ? .orange : .primary)
+                        .foregroundColor(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     if case .paused = hookStatus {
                         Spacer(minLength: 4)

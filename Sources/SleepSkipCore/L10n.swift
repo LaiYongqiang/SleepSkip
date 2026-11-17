@@ -15,14 +15,11 @@ public struct L10n {
     public var pausedBadge: String { isZh ? "已暂停" : "Paused" }
 
     public var notRunningTitle: String { isZh ? "空闲待命" : "Idle" }
-    public var idleFoldersAndHookTitle: String {
-        isZh ? "待命 · 监听目录与 Claude Hook" : "Ready · Watching Folders & Hook"
+    public func idleWatchingSourcesSummary(_ count: Int) -> String {
+        isZh ? "监听 \(count) 个来源" : "Watching \(count) source\(count == 1 ? "" : "s")"
     }
-    public var idleFoldersOnlyTitle: String {
-        isZh ? "待命 · 正在监听 Agent 目录" : "Ready · Watching Agent Folders"
-    }
-    public var idleHookOnlyTitle: String {
-        isZh ? "待命 · Claude Code Hook 已就绪" : "Ready · Claude Code Hook Ready"
+    public var idleHookReadySummary: String {
+        isZh ? "Hook 已连接" : "Hook connected"
     }
     public var idleNoSourcesTitle: String {
         isZh ? "待命 · 未找到可用 Agent 目录" : "Standby · No Agent Folders Found"
@@ -327,6 +324,7 @@ public struct L10n {
     public var claudeHookConnectedBadge: String { isZh ? "已连接" : "Connected" }
     public var claudeHookDisconnectedBadge: String { isZh ? "未连接" : "Not Connected" }
     public var claudeHookHoldingBadge: String { isZh ? "保持中" : "Holding" }
+    public var claudeHookNotHoldingBadge: String { isZh ? "未保持" : "Not Holding" }
     public func claudeHookStatusBadge(_ status: HookProtectionStatus) -> String? {
         switch status {
         case .none:

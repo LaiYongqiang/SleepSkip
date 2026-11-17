@@ -694,6 +694,46 @@ struct SleepSkipCoreTests {
         #expect(manager.isRunning)
     }
 
+    @Test func popoverSceneMatrixIgnoresBannersAndSuppression() throws {
+        // 矩阵一：遍历 isRunning × isFollowingAgents，叠加横幅态（isAuthorizing / externalCLI）
+        // —— 横幅不是场景，场景归属只由 isRunning / isFollowingAgents 推导。
+        let caf = MockCaffeinateRunner()
+        let (manager, defaults, suite) = try makeManager(caf: caf)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        manager.isAuthorizing = true
+        manager.externalCLI = ExternalCLISession(pid: 4242, commandName: "claude", mode: .background)
+        for isRunning in [false, true] {
+            for isFollowing in [false, true] {
+                manager.isRunning = isRunning
+                manager.isFollowingAgents = isFollowing
+                let expected: PopoverScene = {
+                    if isRunning && isFollowing { return .following }
+                    return isRunning ? .manualRunning : .idle
+                }()
+                #expect(
+                    manager.popoverScene == expected,
+                    "isRunning=\(isRunning) isFollowing=\(isFollowing) must map to \(expected)"
+                )
+            }
+        }
+
+        // 矩阵二：autoFollowSuppressed 走真实触发路径（2 小时上限），归入 idle 场景的内部呈现。
+        let caf2 = MockCaffeinateRunner()
+        let (m2, defaults2, suite2) = try makeManager(caf: caf2)
+        defer { defaults2.removePersistentDomain(forName: suite2) }
+
+        m2.setAutoFollowEnabled(true)
+        m2.handleAgentActivity(.active(agents: ["Claude Code"], lastActivity: Date()))
+        #expect(m2.isRunning && m2.isFollowingAgents)
+        #expect(m2.popoverScene == .following)
+
+        m2.handleAutoFollowLimitReached()
+        #expect(m2.autoFollowSuppressed)
+        #expect(!m2.isRunning)
+        #expect(m2.popoverScene == .idle, "suppression must not create a fourth scene")
+    }
+
     @Test func stoppingDuringAuthorizationCancelsTheLaunch() throws {
         let caf = MockCaffeinateRunner()
         let bag = MockBackpackGuard()
