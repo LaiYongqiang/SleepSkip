@@ -4,7 +4,10 @@ All notable releases of **SleepSkip · 惜眠** are documented here.
 
 ## [Unreleased] — beta hardening
 
+- Collapse the popover into three focused scenes (`.idle`, `.following`, `.manualRunning`) with flattened Preferences, explicit promotion to manual timer, and safe return to Auto-Follow (with closed-lid handoff confirmation).
+- Add configurable Auto-Follow safety ceiling (`1h`, `2h`, `4h`, `8h`, `Unlimited`), automatic handoff from expired manual timers to Auto-Follow (`handoffToAutoFollowOnExpiry`), and subprocess-aware grace extension for silent tool calls.
 - Correct automatic-session boundaries, manual-stop suppression, mixed Hook / directory ownership, and authorization cancellation / cleanup.
+- Unify `SessionManager` running-state transition contracts and consolidate Auto-Follow ceiling state ownership.
 - Restore interactive terminal input and signal handling for CLI commands; bind assertion lifetime to their owning wrapper.
 - Read bounded, complete Hook input; preserve user hooks using exact ownership, and use an absolute executable path.
 - Harden directory event filtering, source changes, concurrent CLI status, duplicate launches, and isolated validation.

@@ -308,6 +308,7 @@ public struct L10n {
             case "manual": return isZh ? "手动停止" : "Manual stop"
             case "manualPromotion": return isZh ? "转为手动" : "To manual"
             case "expired": return isZh ? "定时到期" : "Expired"
+            case "expiredHandoff": return isZh ? "到期接力" : "To follow"
             case "unplugged": return isZh ? "拔电停止" : "Unplugged"
             case "overheated": return isZh ? "过热保护" : "Thermal cutoff"
             case "autoFollowQuiet": return isZh ? "静默释放" : "Idle release"
@@ -494,10 +495,74 @@ public struct L10n {
         }
     }
 
+    public func autoFollowNoCapDetail(_ sourceKind: AutoFollowSourceKind) -> String {
+        switch sourceKind {
+        case .hookOnly:
+            return isZh
+                ? "Hook 结束时释放此来源 · 不限时"
+                : "Releases on hook stop · No time cap"
+        case .directoryOnly, .none:
+            return isZh
+                ? "停笔 5 分钟后自动释放 · 不限时"
+                : "Releases 5m after quiet · No time cap"
+        case .both:
+            return isZh
+                ? "Hook 结束且目录停笔 5 分钟后释放 · 不限时"
+                : "Releases after hook stop & 5m quiet · No time cap"
+        }
+    }
+
     public func autoFollowGraceDetail(_ ceilingTime: String) -> String {
         isZh
             ? "若无新写入将自动恢复休眠 · 上限 \(ceilingTime)"
             : "Restores sleep if idle · 2h cap at \(ceilingTime)"
+    }
+
+    public var autoFollowGraceNoCapDetail: String {
+        isZh
+            ? "若无新写入将自动恢复休眠 · 不限时"
+            : "Restores sleep if idle · No time cap"
+    }
+
+    public var autoFollowLimitSectionLabel: String {
+        isZh ? "单次跟随上限" : "Auto-Follow Limit"
+    }
+
+    public func autoFollowCeilingSummary(_ maxMinutes: Double) -> String {
+        if maxMinutes <= 0 {
+            return isZh ? "单次不限时" : "No cap"
+        }
+        let dur = DurationFormatter.formatDuration(maxMinutes, isChinese: isZh)
+        return isZh ? "单次上限 \(dur)" : "\(dur) cap"
+    }
+
+    public var homeAutoFollowManageButton: String {
+        isZh ? "来源与上限" : "Sources & Cap"
+    }
+
+    public var autoFollowSubprocessTitle: String {
+        isZh ? "Agent 子任务运行中，正在延续唤醒" : "Agent Subtask Running · Extending Wake"
+    }
+
+    public var handoffOnExpiryLabel: String {
+        isZh ? "到期后若 Agent 仍在运行则自动接力跟随" : "Continue following if Agent is still active when timer ends"
+    }
+
+    public func manualHandoffStatusLine(handoffEnabled: Bool, activeAgents: [String]) -> String {
+        guard handoffEnabled else {
+            return isZh
+                ? "到期策略：纯手动计时，到期后立即恢复休眠"
+                : "On expiry: Pure manual timer, restores sleep immediately"
+        }
+        let names = autoFollowAgentsLabel(activeAgents)
+        if !names.isEmpty {
+            return isZh
+                ? "到期策略：到期后将自动接力跟随（当前检测到 \(names) 活跃）"
+                : "On expiry: Auto-handoff to Agent follow (\(names) active)"
+        }
+        return isZh
+            ? "到期策略：到期时若检测到 Agent 活跃将自动接力，否则恢复休眠"
+            : "On expiry: Auto-handoff if Agent is active, otherwise restore sleep"
     }
 
     public func autoFollowPolicySummary(_ sourceKind: AutoFollowSourceKind) -> String {

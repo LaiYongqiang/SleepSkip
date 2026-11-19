@@ -228,13 +228,13 @@ final class ProbeStates: @unchecked Sendable {
         require(discovered.activeCount > 0, "new source directory must be discovered without polling or panel reopen")
         late.stop()
         let cappedStates = ProbeStates()
-        let caps = ProbeStates()
-        let capMonitor = AgentActivityMonitor(tracker: AgentActivityTracker(policy: .init(activityWindow: 0.4, gracePeriod: 0.2, maxAutoSessionDuration: 0.1)),
-            onStateChange: cappedStates.append, onSessionLimitReached: { caps.append(.inactive) })
+        let capTracker = AgentActivityTracker(policy: .init(activityWindow: 0.4, gracePeriod: 0.2, maxAutoSessionDuration: 0.1))
+        let capMonitor = AgentActivityMonitor(tracker: capTracker, onStateChange: cappedStates.append)
         capMonitor.start(sources: [source]); pause(0.4)
         try Data("capped".utf8).write(to: file)
-        pause(1.5)
-        require(caps.inactiveCount == 1, "session cap must be delivered once")
+        pause(0.25)
+        require(capTracker.autoSessionExceeded(), "session cap must be recorded by tracker")
+        pause(1.25)
         require(cappedStates.inactiveCount > 0, "session cap must preserve quiet timer through inactivity")
         capMonitor.stop()
         weak var releasedMonitor: AgentActivityMonitor?

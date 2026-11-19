@@ -230,48 +230,6 @@ struct SleepSkipCoreTests {
         )
     }
 
-    @Test func migratesSettingsFromPreRenameDomain() throws {
-        let newSuite = "io.github.laiyongqiang.SleepSkip.migrate.\(UUID().uuidString)"
-        let oldSuite = "io.github.laiyongqiang.SleepGuard.migrate.\(UUID().uuidString)"
-        let newDefaults = try #require(UserDefaults(suiteName: newSuite))
-        let oldDefaults = try #require(UserDefaults(suiteName: oldSuite))
-        defer {
-            newDefaults.removePersistentDomain(forName: newSuite)
-            oldDefaults.removePersistentDomain(forName: oldSuite)
-        }
-
-        oldDefaults.set("keepDisplay", forKey: "sleepguard.mode")
-        oldDefaults.set(90.0, forKey: "sleepguard.durationMinutes")
-        oldDefaults.set("en", forKey: "sleepguard.language")
-
-        PreferencesStore.migrateFromLegacyDomainIfNeeded(defaults: newDefaults, legacyDefaults: oldDefaults)
-        let migrated = PreferencesStore(defaults: newDefaults).load()
-        #expect(migrated.mode == .keepDisplay)
-        #expect(migrated.durationMinutes == 90)
-        #expect(migrated.language == .en)
-
-        oldDefaults.set("background", forKey: "sleepguard.mode")
-        PreferencesStore.migrateFromLegacyDomainIfNeeded(defaults: newDefaults, legacyDefaults: oldDefaults)
-        #expect(PreferencesStore(defaults: newDefaults).load().mode == .keepDisplay)
-    }
-
-    @Test func migrationDoesNotOverwriteExistingSettings() throws {
-        let newSuite = "io.github.laiyongqiang.SleepSkip.existing.\(UUID().uuidString)"
-        let oldSuite = "io.github.laiyongqiang.SleepGuard.existing.\(UUID().uuidString)"
-        let newDefaults = try #require(UserDefaults(suiteName: newSuite))
-        let oldDefaults = try #require(UserDefaults(suiteName: oldSuite))
-        defer {
-            newDefaults.removePersistentDomain(forName: newSuite)
-            oldDefaults.removePersistentDomain(forName: oldSuite)
-        }
-
-        newDefaults.set("background", forKey: "sleepskip.mode")
-        oldDefaults.set("keepDisplay", forKey: "sleepguard.mode")
-
-        PreferencesStore.migrateFromLegacyDomainIfNeeded(defaults: newDefaults, legacyDefaults: oldDefaults)
-        #expect(PreferencesStore(defaults: newDefaults).load().mode == .background)
-    }
-
     @Test func preferencesPersistenceRoundTrip() throws {
         let suiteName = "io.github.laiyongqiang.SleepSkip.test.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -285,6 +243,8 @@ struct SleepSkipCoreTests {
         #expect(initial.allowClosedLid == false)
         #expect(initial.stopOnUnplug == false)
         #expect(initial.autoFollowAgents == true)
+        #expect(initial.autoFollowMaxMinutes == 120)
+        #expect(initial.handoffToAutoFollowOnExpiry == true)
         #expect(initial.batteryThresholdPercent == 10)
 
         var updated = initial
@@ -295,17 +255,24 @@ struct SleepSkipCoreTests {
         updated.allowClosedLid = true
         updated.stopOnUnplug = true
         updated.autoFollowAgents = false
+        updated.autoFollowMaxMinutes = 480
+        updated.handoffToAutoFollowOnExpiry = false
         updated.language = .en
         store.save(updated)
 
         #expect(store.load() == updated)
 
-        // Existing installs without an explicit lockOnStart key preserve legacy true behavior.
-        let legacySuite = "io.github.laiyongqiang.SleepSkip.legacyLock.\(UUID().uuidString)"
-        let legacyDefaults = try #require(UserDefaults(suiteName: legacySuite))
-        defer { legacyDefaults.removePersistentDomain(forName: legacySuite) }
-        legacyDefaults.set("background", forKey: "sleepskip.mode")
-        #expect(PreferencesStore(defaults: legacyDefaults).load().lockOnStart == true)
+        updated.autoFollowMaxMinutes = 0
+        store.save(updated)
+        #expect(store.load().autoFollowMaxMinutes == 0)
+
+        // Invalid or out-of-range autoFollowMaxMinutes values fall back or clamp safely on load.
+        for invalid in [-10.0, Double.infinity, Double.nan] {
+            defaults.set(invalid, forKey: "sleepskip.autoFollowMaxMinutes")
+            #expect(store.load().autoFollowMaxMinutes == 120)
+        }
+        defaults.set(CommandBuilder.maxDurationMinutes * 10, forKey: "sleepskip.autoFollowMaxMinutes")
+        #expect(store.load().autoFollowMaxMinutes == CommandBuilder.maxDurationMinutes)
     }
 
     @Test func sessionManagerLifecycleAndPreFlightGuards() throws {
@@ -757,6 +724,27 @@ struct SleepSkipCoreTests {
         #expect(manager.isRunning)
     }
 
+    @Test func handleAgentActivityTriggersAutoFollowLimitWhenTrackerExceedsCeiling() throws {
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        manager.setAutoFollowEnabled(true)
+        manager.setAutoFollowMaxMinutes(60)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(manager.isRunning && manager.isFollowingAgents)
+
+        now = now.addingTimeInterval(3600)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(!manager.isRunning)
+        #expect(!manager.isFollowingAgents)
+        #expect(manager.autoFollowLimitReached)
+        #expect(manager.autoFollowSuppressed)
+    }
+
     @Test func popoverSceneMatrixIgnoresBannersAndSuppression() throws {
         // 矩阵一：遍历 isRunning × isFollowingAgents，叠加横幅态（isAuthorizing / externalCLI）
         // —— 横幅不是场景，场景归属只由 isRunning / isFollowingAgents 推导。
@@ -1122,19 +1110,23 @@ struct SleepSkipCoreTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let executable = directory.appendingPathComponent("SleepSkip ' helper")
+        let previousExecutable = directory.appendingPathComponent("Previous SleepSkip")
         let marker = directory.appendingPathComponent("called")
         try Data("#!/bin/sh\nprintf '%s:%s' \"$1\" \"$2\" > '\(marker.path)'\n".utf8).write(to: executable)
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: previousExecutable)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: previousExecutable.path)
         let url = directory.appendingPathComponent("settings.json")
+        try ClaudeCodeHookManager(settingsURL: url, executableURL: previousExecutable).connect()
+        var seeded = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var seededHooks = try #require(seeded["hooks"] as? [String: Any])
+        var seededPromptEntries = try #require(seededHooks["UserPromptSubmit"] as? [[String: Any]])
         let example = "echo 'sleepskip hook start --agent claude-code'"
-        let settings: [String: Any] = ["theme": "untouched", "hooks": [
-            "UserPromptSubmit": [["hooks": [
-                ["type": "command", "command": ClaudeCodeHookManager.startCommand],
-                ["type": "command", "command": example]
-            ]]],
-            "Stop": [["hooks": [["type": "command", "command": ClaudeCodeHookManager.stopCommand]]]]
-        ]]
-        try JSONSerialization.data(withJSONObject: settings).write(to: url)
+        seededPromptEntries.append(["hooks": [["type": "command", "command": example]]])
+        seededHooks["UserPromptSubmit"] = seededPromptEntries
+        seeded["theme"] = "untouched"
+        seeded["hooks"] = seededHooks
+        try JSONSerialization.data(withJSONObject: seeded).write(to: url)
         let hooks = ClaudeCodeHookManager(settingsURL: url, executableURL: executable)
         #expect(!hooks.isConnected)
         try hooks.connect()
@@ -2109,6 +2101,163 @@ struct SleepSkipCoreTests {
         #expect(!manualStandbyZh.contains("将接管"))
         #expect(manualStandbyZh.contains("暂停规则"))
         #expect(manualStandbyEn.contains("manual stop pauses following"))
+    }
+
+    @Test func configurableAutoFollowMaxMinutesSupportsExtendedAndUnlimitedCaps() throws {
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(manager.config.autoFollowMaxMinutes == 120)
+        manager.setAutoFollowMaxMinutes(240)
+        #expect(PreferencesStore(defaults: defaults).load().autoFollowMaxMinutes == 240)
+
+        manager.setAutoFollowEnabled(true)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(manager.isFollowingAgents)
+        #expect(!manager.isIndefinite)
+        #expect(manager.remainingSeconds == 14400)
+        #expect(caf.lastTimeout == 14430)
+
+        // Switching to unlimited (0) while running removes the hard ceiling and keeps following across >8h of writes.
+        manager.setAutoFollowMaxMinutes(0)
+        #expect(manager.isFollowingAgents)
+        #expect(manager.isIndefinite)
+        #expect(manager.endDate == nil)
+        #expect(caf.lastTimeout == nil)
+
+        now = now.addingTimeInterval(30_000)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(manager.isRunning && manager.isFollowingAgents)
+        #expect(!manager.autoFollowLimitReached)
+
+        // Still releases cleanly once the agent goes quiet past the 5m grace period.
+        manager.handleAgentActivity(.inactive)
+        #expect(!manager.isRunning)
+    }
+
+    @Test func customDurationInputAutoAppliesOnStartAndLiveUpdates() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(manager.config.durationMinutes == 240)
+        manager.showCustomInput = true
+        manager.customMinutesText = "300"
+        #expect(manager.config.durationMinutes == 300)
+        #expect(manager.config.customMinutes == 300)
+
+        // Clicking start directly without pressing Apply must launch with 300 minutes (18000s).
+        manager.startConfiguredSession()
+        #expect(manager.isRunning)
+        #expect(!manager.showCustomInput)
+        #expect(manager.initialMinutes == 300)
+        #expect(manager.remainingSeconds == 18000)
+        #expect(caf.lastTimeout == 18000)
+
+        manager.stopSession(reason: .manual)
+
+        // Invalid custom text while custom input is open must block launch rather than use a stale preset.
+        manager.showCustomInput = true
+        manager.customMinutesText = "invalid"
+        manager.startConfiguredSession()
+        #expect(!manager.isRunning)
+        #expect(manager.errorMessage != nil)
+    }
+
+    @Test func manualSessionExpiryHandsOffToAutoFollowWhenEnabledAndAgentActive() throws {
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        manager.setAutoFollowEnabled(true)
+        manager.selectDuration(180) // 3 hours manual floor
+        #expect(manager.config.handoffToAutoFollowOnExpiry)
+        manager.startConfiguredSession()
+        #expect(manager.isRunning && !manager.isFollowingAgents)
+
+        // Near the end of the 3-hour manual window, the agent is still writing.
+        now = now.addingTimeInterval(180 * 60 - 60)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(manager.activeAutoFollowCandidateAgents == ["Codex"])
+
+        // At the 3-hour mark, the manual timer expires and hands off to Auto-Follow instead of stopping.
+        now = now.addingTimeInterval(60)
+        manager.refreshDisplayTick()
+        #expect(manager.isRunning)
+        #expect(manager.isFollowingAgents)
+        #expect(manager.followingAgents == ["Codex"])
+        #expect(manager.history.first?.stopReasonCode == "expiredHandoff")
+
+        // Once the agent finishes and goes quiet, auto-follow releases sleep protection.
+        now = now.addingTimeInterval(400)
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(!manager.isRunning)
+
+        // When handoffToAutoFollowOnExpiry is disabled, expiry stops immediately even if an agent is active.
+        manager.setHandoffToAutoFollowOnExpiry(false)
+        manager.selectDuration(60)
+        manager.startConfiguredSession()
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        now = now.addingTimeInterval(3600)
+        manager.refreshDisplayTick()
+        #expect(!manager.isRunning)
+    }
+
+    @Test func subprocessActivityExtendsAutoFollowAcrossLongSilentToolCalls() throws {
+        var now = Date(timeIntervalSince1970: 1_700_000_000)
+        let caf = MockCaffeinateRunner()
+        let (manager, defaults, suite) = try makeManager(caf: caf, now: { now })
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        var subprocessRunning = true
+        manager.agentTracker.setSubprocessActivityChecker { candidates in
+            subprocessRunning ? candidates.intersection(["codex"]) : []
+        }
+
+        manager.setAutoFollowEnabled(true)
+        manager.agentTracker.recordActivity(sourceID: "codex")
+        manager.handleAgentActivity(manager.agentTracker.evaluate())
+        #expect(manager.isFollowingAgents)
+        #expect(!manager.isSubprocessExtendedGrace)
+
+        // 6 minutes pass with zero transcript writes, but a child compile/test process is still running.
+        now = now.addingTimeInterval(360)
+        let stateDuringBuild = manager.agentTracker.evaluate(at: now)
+        #expect(stateDuringBuild.isHolding)
+        manager.handleAgentActivity(stateDuringBuild)
+        #expect(manager.isRunning && manager.isFollowingAgents)
+        #expect(manager.isSubprocessExtendedGrace)
+
+        // Subprocess finishes; after the grace period elapses with no new writes, wake protection releases.
+        subprocessRunning = false
+        now = now.addingTimeInterval(310)
+        let stateAfterBuild = manager.agentTracker.evaluate(at: now)
+        #expect(stateAfterBuild == .inactive)
+        manager.handleAgentActivity(stateAfterBuild)
+        #expect(!manager.isRunning)
+        #expect(!manager.isSubprocessExtendedGrace)
+
+        // Verify process tree detector distinguishes active build tools from idle 0% CPU MCP sidecars.
+        let idleMCPOnly: [AgentSubprocessDetector.ProcessSnapshotRow] = [
+            .init(pid: 100, ppid: 1, cpuPercent: 0.0, commandName: "/usr/local/bin/codex"),
+            .init(pid: 101, ppid: 100, cpuPercent: 0.0, commandName: "/usr/local/bin/node")
+        ]
+        #expect(AgentSubprocessDetector.detectActiveSources(candidateSources: ["codex"], processes: idleMCPOnly).isEmpty)
+
+        let activeCargoBuild: [AgentSubprocessDetector.ProcessSnapshotRow] = [
+            .init(pid: 100, ppid: 1, cpuPercent: 0.1, commandName: "/usr/local/bin/codex"),
+            .init(pid: 102, ppid: 100, cpuPercent: 0.0, commandName: "/bin/zsh"),
+            .init(pid: 103, ppid: 102, cpuPercent: 85.0, commandName: "/Users/dev/.cargo/bin/cargo")
+        ]
+        #expect(AgentSubprocessDetector.detectActiveSources(candidateSources: ["codex"], processes: activeCargoBuild) == ["codex"])
     }
 
 }

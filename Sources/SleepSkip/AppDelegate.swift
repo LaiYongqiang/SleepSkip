@@ -50,7 +50,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             result.hasSeenAutoFollowNotice = true
             return result
         }
-        PreferencesStore.migrateFromLegacyDomainIfNeeded(defaults: UserDefaults(suiteName: "io.github.laiyongqiang.SleepSkip") ?? .standard)
         return PreferencesStore()
     }()
     // Deferred until the duplicate-instance check grants ownership. Even constructing a manager
@@ -63,12 +62,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 screenLocker: inert, notifier: inert, loginItem: inert, cliInstaller: inert,
                 claudeHookController: inert, runtimeStateURL: nil, checkStaleSleepOnInit: false)
         }
-        return SessionManager(store: store, caffeinateRunner: CaffeinateRunner(),
+        let manager = SessionManager(store: store, caffeinateRunner: CaffeinateRunner(),
             backpackGuard: BackpackGuard(), unprivilegedLidGuard: UnprivilegedLidGuard(),
             powerMonitor: PowerMonitor(), thermalMonitor: ThermalMonitor(), screenLocker: ScreenLocker(),
             notifier: NativeNotifier(), loginItem: LoginItemManager(), cliInstaller: CLICommandInstaller(),
             claudeHookController: ClaudeCodeHookManager(), runtimeStateURL: RuntimeStateSnapshot.defaultURL,
             checkStaleSleepOnInit: true)
+        manager.agentTracker.setSubprocessActivityChecker { candidates in
+            AgentSubprocessDetector.liveActiveSources(among: candidates)
+        }
+        return manager
     }()
 
     override init() {
@@ -262,12 +265,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 DispatchQueue.main.async {
                     guard let self, self.agentMonitorGeneration == generation else { return }
                     self.sessionManager.handleAgentActivity(state)
-                }
-            },
-            onSessionLimitReached: { [weak self] in
-                DispatchQueue.main.async {
-                    guard let self, self.agentMonitorGeneration == generation else { return }
-                    self.sessionManager.handleAutoFollowLimitReached()
                 }
             },
             onSourcesChanged: { [weak self] sources in
@@ -916,9 +913,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         stopDisplayTimer()
         globalHotKeyMonitor?.stop()
         globalHotKeyMonitor = nil
-        // A duplicate instance never started anything; stopping here would disable the guard the
-        // primary instance is relying on.
-        guard didStartPrimaryInstance else { return }
         sessionManager.stopSession(reason: .silent)
         sessionManager.clearRuntimeStateSnapshot()
         if let isolatedSuiteName {

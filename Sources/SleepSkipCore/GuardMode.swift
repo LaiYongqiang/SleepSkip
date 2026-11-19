@@ -164,6 +164,8 @@ public struct SessionConfig: Equatable, Sendable {
     public var stopOnUnplug: Bool
     public var thermalCutoff: ThermalCutoff
     public var autoFollowAgents: Bool
+    public var autoFollowMaxMinutes: Double
+    public var handoffToAutoFollowOnExpiry: Bool
     public var disabledAgentSourceIDs: [String]
     public var customAgentPaths: [String]
     public var globalShortcutEnabled: Bool
@@ -180,6 +182,8 @@ public struct SessionConfig: Equatable, Sendable {
         stopOnUnplug: Bool = false,
         thermalCutoff: ThermalCutoff = .critical,
         autoFollowAgents: Bool = true,
+        autoFollowMaxMinutes: Double = 120,
+        handoffToAutoFollowOnExpiry: Bool = true,
         disabledAgentSourceIDs: [String] = [],
         customAgentPaths: [String] = [],
         globalShortcutEnabled: Bool = true,
@@ -195,6 +199,8 @@ public struct SessionConfig: Equatable, Sendable {
         self.stopOnUnplug = stopOnUnplug
         self.thermalCutoff = thermalCutoff
         self.autoFollowAgents = autoFollowAgents
+        self.autoFollowMaxMinutes = autoFollowMaxMinutes
+        self.handoffToAutoFollowOnExpiry = handoffToAutoFollowOnExpiry
         self.disabledAgentSourceIDs = disabledAgentSourceIDs
         self.customAgentPaths = customAgentPaths
         self.globalShortcutEnabled = globalShortcutEnabled
@@ -202,6 +208,7 @@ public struct SessionConfig: Equatable, Sendable {
     }
 
     public static let standardPresets: [Double] = [30, 60, 120, 240, 0]
+    public static let autoFollowLimitPresets: [Double] = [120, 240, 480, 720, 0]
 
     public var effectiveAllowClosedLid: Bool {
         mode == .background && allowClosedLid

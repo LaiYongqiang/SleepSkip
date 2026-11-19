@@ -18,8 +18,9 @@ jobs:
 
       - name: Run verification suite
         run: |
-          chmod +x scripts/verify.sh
+          chmod +x scripts/verify.sh scripts/probe_app_integration.sh
           ./scripts/verify.sh
+          ./scripts/probe_app_integration.sh
           bash scripts/verify_release.sh
 
       - name: Build release .app bundle and DMG

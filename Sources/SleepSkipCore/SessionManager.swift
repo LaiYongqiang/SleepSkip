@@ -95,10 +95,19 @@ public final class SessionManager: ObservableObject {
     @Published public var staleSleepDisabled: Bool = false
     @Published public var showSettings: Bool = false
     @Published public var showAgentSourcesConfig: Bool = false
-    @Published public var showAdvancedSettings: Bool = false
     @Published public var showHistory: Bool = false
-    @Published public var showCustomInput: Bool = false
-    @Published public var customMinutesText: String = "90"
+    @Published public var showCustomInput: Bool = false {
+        didSet {
+            guard showCustomInput, !oldValue else { return }
+            syncLiveCustomDurationIfValid()
+        }
+    }
+    @Published public var customMinutesText: String = "90" {
+        didSet {
+            guard showCustomInput else { return }
+            syncLiveCustomDurationIfValid()
+        }
+    }
     @Published public var launchAtLogin: Bool = false
     @Published public var externalCLI: ExternalCLISession? = nil
 
@@ -110,6 +119,8 @@ public final class SessionManager: ObservableObject {
     @Published public var autoFollowGraceEndDate: Date? = nil
     /// Seconds remaining until the grace period releases, updated while the popover is open.
     @Published public var autoFollowGraceRemainingSeconds: Int = 0
+    /// True when the current grace window is being extended because an agent subprocess is still running.
+    @Published public private(set) var isSubprocessExtendedGrace: Bool = false
     /// True once an automatic session hit its hard ceiling; the next detection starts fresh.
     @Published public var autoFollowLimitReached: Bool = false
     /// Set after the user stops a session while agents are still writing, so the Mac does not
@@ -214,6 +225,10 @@ public final class SessionManager: ObservableObject {
         isRunning && !isFollowingAgents && currentAutoFollowSourceKind != .none
     }
 
+    public var activeAutoFollowCandidateAgents: [String] {
+        mergedFollowingAgents()
+    }
+
     private var canEngageUnprivilegedLidForAutoFollow: Bool {
         config.allowClosedLid && config.closedLidStrategy == .unprivileged && unprivilegedLidGuard != nil
     }
@@ -247,6 +262,10 @@ public final class SessionManager: ObservableObject {
         let next = currentAutoFollowSourceKind
         if activeAutoFollowSourceKind != next {
             activeAutoFollowSourceKind = next
+        }
+        let nextSubprocessGrace = !hasActiveHookSessions && !agentTracker.currentSubprocessExtendedSources.isEmpty
+        if isSubprocessExtendedGrace != nextSubprocessGrace {
+            isSubprocessExtendedGrace = nextSubprocessGrace
         }
         let nextHookStatus = computeHookProtectionStatus()
         if hookProtectionStatus != nextHookStatus {
@@ -397,6 +416,11 @@ public final class SessionManager: ObservableObject {
             return
         }
 
+        if isFollowingAgents, !hasActiveHookSessions, agentTracker.autoSessionExceeded() {
+            handleAutoFollowLimitReached()
+            return
+        }
+
         if hasActiveHookSessions || agentTracker.shouldHoldAssertion(for: state) {
             let previousAgents = followingAgents
             switch state {
@@ -450,24 +474,14 @@ public final class SessionManager: ObservableObject {
         guard !isRunning, !isAuthorizing, passesPowerAndThermalPreflight() else { return }
         notifier.preparePermissionIfNeeded()
         // Auto-follow runs in background mode, engages the standard no-auth closed-lid guard
-        // when allowClosedLid is enabled, and is bounded by the agent policy's hard ceiling.
-        let ceilingSeconds = max(1, Int(agentTracker.currentPolicy.maxAutoSessionDuration.rounded()))
+        // when allowClosedLid is enabled, and uses the configured auto-follow ceiling (or nil when unlimited).
+        let ceilingSeconds = effectiveAutoFollowCeilingSeconds
         var lidEngaged = false
         if canEngageUnprivilegedLidForAutoFollow, let unprivilegedLidGuard {
-            unprivilegedLidGuard.enable { [weak self] result in
-                switch result {
-                case .success:
-                    lidEngaged = true
-                case .failure:
-                    guard let self else { return }
-                    // The user asked for lid protection on this session: never swallow the
-                    // guard failure, or closing the lid would silently sleep the Mac.
-                    self.errorMessage = self.l10n.unprivilegedLidUnavailable
-                }
-            }
+            lidEngaged = enableUnprivilegedLidGuard(unprivilegedLidGuard, useGenericUnavailableError: true)
         }
         do {
-            try caffeinateRunner.start(mode: .background, timeoutSeconds: ceilingSeconds + 30) { [weak self] in
+            try caffeinateRunner.start(mode: .background, timeoutSeconds: ceilingSeconds.map { $0 + 30 }) { [weak self] in
                 self?.handleCaffeinateExited()
             }
         } catch {
@@ -478,23 +492,12 @@ public final class SessionManager: ObservableObject {
             return
         }
         agentTracker.restartSessionWindow()
-        activeMode = .background
-        activeClosedLid = lidEngaged
-        isIndefinite = false
-        initialMinutes = Double(ceilingSeconds) / 60.0
-        let now = nowProvider()
-        activeSessionStartDate = now
-        activeSessionTrigger = .autoFollow
-        activeSessionAgents = followingAgents
-        endDate = now.addingTimeInterval(TimeInterval(ceilingSeconds))
-        isFollowingAgents = true
-        autoFollowLimitReached = false
-        isRunning = true
-        syncAutoFollowSourceKind()
-        refreshDisplayTick()
-        startPowerWatch()
-        startThermalWatch()
-        notifyStateTransition()
+        commitAutoFollowSession(
+            mode: .background,
+            ceilingSeconds: ceilingSeconds,
+            closedLid: lidEngaged,
+            startSafetyWatches: true
+        )
     }
 
     private func endAutoFollow(stopReasonCode: String = "autoFollowQuiet") {
@@ -649,18 +652,31 @@ public final class SessionManager: ObservableObject {
         !activeHookSessions.isEmpty
     }
 
+    public var effectiveAutoFollowCeilingSeconds: Int? {
+        let raw = agentTracker.currentPolicy.maxAutoSessionDuration
+        guard raw.isFinite, raw > 0 else { return nil }
+        return max(1, Int(raw.rounded()))
+    }
+
+    private static func policyDuration(forAutoFollowMaxMinutes minutes: Double) -> TimeInterval {
+        guard minutes.isFinite, minutes > 0 else { return .infinity }
+        return minutes * 60.0
+    }
+
     /// A missing Stop hook must not leave a suppressed lease alive forever. The host schedules
     /// this earliest per-lease deadline independently of whether an assertion is currently held.
     public var nextHookLeaseExpirationDate: Date? {
-        activeHookSessions.values.map {
-            $0.startedAt.addingTimeInterval(max(1, agentTracker.currentPolicy.maxAutoSessionDuration))
+        guard let ceilingSeconds = effectiveAutoFollowCeilingSeconds else { return nil }
+        return activeHookSessions.values.map {
+            $0.startedAt.addingTimeInterval(TimeInterval(ceilingSeconds))
         }.min()
     }
 
     @discardableResult
     public func expireHookLeases() -> [HookLease] {
+        guard let ceilingSeconds = effectiveAutoFollowCeilingSeconds else { return [] }
         let now = nowProvider()
-        let duration = max(1, agentTracker.currentPolicy.maxAutoSessionDuration)
+        let duration = TimeInterval(ceilingSeconds)
         let expired = activeHookSessions.values.filter {
             now.timeIntervalSince($0.startedAt) >= duration
         }.sorted { $0.startedAt < $1.startedAt }
@@ -738,6 +754,11 @@ public final class SessionManager: ObservableObject {
 
         let loaded = store.load()
         self.config = loaded
+        if agentPolicy == .default {
+            self.agentTracker.setMaxAutoSessionDuration(
+                Self.policyDuration(forAutoFollowMaxMinutes: loaded.autoFollowMaxMinutes)
+            )
+        }
         self.customMinutesText = loaded.customMinutes == loaded.customMinutes.rounded()
             ? "\(Int(loaded.customMinutes))"
             : String(format: "%.1f", loaded.customMinutes)
@@ -770,27 +791,52 @@ public final class SessionManager: ObservableObject {
     public func selectDuration(_ minutes: Double) {
         config.durationMinutes = minutes
         showCustomInput = false
+        errorMessage = nil
         persistConfig()
     }
 
-    public func applyCustomDuration() {
+    private func syncLiveCustomDurationIfValid() {
         let trimmed = customMinutesText.trimmingCharacters(in: .whitespacesAndNewlines)
-        // `Double("inf")` and `Double("1e999")` parse to infinity; sanitize before persisting so a
-        // bad value can never reach Int(_:) in the countdown or the caffeinate timeout.
+        guard let parsed = Double(trimmed), let val = CommandBuilder.sanitizeMinutes(parsed) else {
+            return
+        }
+        if config.customMinutes != val || config.durationMinutes != val {
+            config.customMinutes = val
+            config.durationMinutes = val
+            errorMessage = nil
+            persistConfig()
+        }
+    }
+
+    @discardableResult
+    private func applyPendingCustomDurationIfNeeded() -> Bool {
+        guard showCustomInput else { return true }
+        let trimmed = customMinutesText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let parsed = Double(trimmed), let val = CommandBuilder.sanitizeMinutes(parsed) else {
             errorMessage = l10n.invalidDurationError(CommandBuilder.maxDurationMinutes)
-            return
+            return false
         }
         config.customMinutes = val
         config.durationMinutes = val
         showCustomInput = false
         errorMessage = nil
         persistConfig()
+        return true
+    }
+
+    public func applyCustomDuration() {
+        _ = applyPendingCustomDurationIfNeeded()
     }
 
     public func setLockOnStart(_ enabled: Bool) {
         config.lockOnStart = enabled
         persistConfig()
+    }
+
+    public func setHandoffToAutoFollowOnExpiry(_ enabled: Bool) {
+        config.handoffToAutoFollowOnExpiry = enabled
+        persistConfig()
+        notifyStateTransition()
     }
 
     public func setAllowClosedLid(_ enabled: Bool) {
@@ -800,6 +846,56 @@ public final class SessionManager: ObservableObject {
             syncAutoFollowClosedLidGuard()
             notifyStateTransition()
         }
+    }
+
+    public func setAutoFollowMaxMinutes(_ minutes: Double) {
+        let sanitized: Double = minutes <= 0 ? 0 : (CommandBuilder.sanitizeMinutes(minutes) ?? 120)
+        config.autoFollowMaxMinutes = sanitized
+        persistConfig()
+        agentTracker.setMaxAutoSessionDuration(Self.policyDuration(forAutoFollowMaxMinutes: sanitized))
+
+        if autoFollowLimitReached, !agentTracker.autoSessionExceeded() {
+            autoFollowLimitReached = false
+            autoFollowSuppressed = false
+            syncAutoFollowSourceKind()
+        }
+
+        if isRunning && isFollowingAgents && !isAuthorizing {
+            let now = nowProvider()
+            let start = activeSessionStartDate ?? now
+            if let ceilingSeconds = effectiveAutoFollowCeilingSeconds {
+                let newEndDate = start.addingTimeInterval(TimeInterval(ceilingSeconds))
+                if now >= newEndDate {
+                    handleAutoFollowLimitReached()
+                    return
+                }
+                let remainingUntilCap = max(1, Int(newEndDate.timeIntervalSince(now).rounded(.up)))
+                do {
+                    try caffeinateRunner.start(mode: activeMode, timeoutSeconds: remainingUntilCap + 30) { [weak self] in
+                        self?.handleCaffeinateExited()
+                    }
+                    isIndefinite = false
+                    initialMinutes = Double(ceilingSeconds) / 60.0
+                    endDate = newEndDate
+                    refreshDisplayTick()
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            } else {
+                do {
+                    try caffeinateRunner.start(mode: activeMode, timeoutSeconds: nil) { [weak self] in
+                        self?.handleCaffeinateExited()
+                    }
+                    isIndefinite = true
+                    initialMinutes = 0
+                    endDate = nil
+                    remainingSeconds = 0
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+        notifyStateTransition()
     }
 
     /// Switches how lid-close sleep is suppressed. Takes effect on the next session; an active
@@ -917,11 +1013,19 @@ public final class SessionManager: ObservableObject {
         guard let endDate else { return }
         if now >= endDate {
             if isFollowingAgents { handleAutoFollowLimitReached() }
-            else { stopSession(reason: .expired) }
+            else { handleManualSessionExpired() }
             return
         }
         let remaining = max(0, Int(endDate.timeIntervalSince(now).rounded(.down)))
         if remainingSeconds != remaining { remainingSeconds = remaining }
+    }
+
+    private func handleManualSessionExpired() {
+        if config.handoffToAutoFollowOnExpiry, canSwitchToAutoFollow {
+            switchManualToAutoFollow(stopReasonCode: "expiredHandoff")
+        } else {
+            stopSession(reason: .expired)
+        }
     }
 
     public func reconcileOnWakeOrShow() {
@@ -938,8 +1042,7 @@ public final class SessionManager: ObservableObject {
     }
 
     public func startConfiguredSession() {
-        guard !isAuthorizing else { return }
-        errorMessage = nil
+        guard prepareManualStartInput() else { return }
         persistConfig()
 
         guard passesPowerAndThermalPreflight() else { return }
@@ -1126,37 +1229,21 @@ public final class SessionManager: ObservableObject {
         }
         if isFollowingAgents {
             recordCompletedSession(stopReasonCode: "manualPromotion")
-            isFollowingAgents = false
-            followingAgents = []
-            activeAutoFollowSourceKind = .none
-            autoFollowGraceEndDate = nil
-            autoFollowGraceRemainingSeconds = 0
+            clearAutoFollowPresentationState()
         }
-        activeMode = mode
-        activeClosedLid = closedLid
-        isIndefinite = (timeoutSec == nil)
-        initialMinutes = minutes
-        let now = nowProvider()
-        activeSessionStartDate = now
-        activeSessionTrigger = nextManualTrigger
+        let trigger = nextManualTrigger
         nextManualTrigger = .manual
-        activeSessionAgents = []
-        endDate = timeoutSec.map { now.addingTimeInterval(TimeInterval($0)) }
-        isRunning = true
-        pendingAutoFollowSwitchConfirmation = false
         showCustomInput = false
         showSettings = false
-        syncAutoFollowSourceKind()
-        refreshDisplayTick()
-        startPowerWatch()
-        startThermalWatch()
-
-        notifyStateTransition()
-
-        if lockImmediately {
-            onRequestClosePopover?()
-            screenLocker.lockScreen()
-        }
+        commitManualSession(
+            mode: mode,
+            minutes: minutes,
+            timeoutSeconds: timeoutSec,
+            closedLid: closedLid,
+            trigger: trigger,
+            startSafetyWatches: true,
+            lockImmediately: lockImmediately
+        )
     }
 
     public func switchRunningMode(to newMode: GuardMode) {
@@ -1164,12 +1251,17 @@ public final class SessionManager: ObservableObject {
         errorMessage = nil
 
         if isFollowingAgents {
-            let remainingUntilCap = max(
-                1,
-                Int((endDate?.timeIntervalSince(nowProvider()) ?? agentTracker.currentPolicy.maxAutoSessionDuration).rounded(.up))
-            )
+            let timeoutSeconds: Int?
+            if let endDate {
+                let remainingUntilCap = max(1, Int(endDate.timeIntervalSince(nowProvider()).rounded(.up)))
+                timeoutSeconds = remainingUntilCap + 30
+            } else if let ceilingSeconds = effectiveAutoFollowCeilingSeconds {
+                timeoutSeconds = ceilingSeconds + 30
+            } else {
+                timeoutSeconds = nil
+            }
             do {
-                try caffeinateRunner.start(mode: newMode, timeoutSeconds: remainingUntilCap + 30) { [weak self] in
+                try caffeinateRunner.start(mode: newMode, timeoutSeconds: timeoutSeconds) { [weak self] in
                     self?.handleCaffeinateExited()
                 }
                 activeMode = newMode
@@ -1212,8 +1304,7 @@ public final class SessionManager: ObservableObject {
 
     /// Explicitly hands off an active auto-follow session to the user's configured manual timer.
     public func promoteAutoFollowToManual() {
-        guard isRunning, isFollowingAgents, !isAuthorizing else { return }
-        errorMessage = nil
+        guard isRunning, isFollowingAgents, prepareManualStartInput() else { return }
         let targetMinutes = config.durationMinutes
         if activeMode == .background, config.allowClosedLid, config.closedLidStrategy == .privileged {
             startPrivilegedLidGuard(
@@ -1234,49 +1325,28 @@ public final class SessionManager: ObservableObject {
             return
         }
 
+        var nextClosedLid = activeClosedLid
         if activeMode == .background, canEngageUnprivilegedLidForAutoFollow, let unprivilegedLidGuard {
-            if !activeClosedLid {
-                unprivilegedLidGuard.enable { [weak self] result in
-                    guard let self else { return }
-                    switch result {
-                    case .success:
-                        self.activeClosedLid = true
-                    case .failure(let error):
-                        self.errorMessage = error.localizedDescription
-                    }
-                }
+            if !activeClosedLid, enableUnprivilegedLidGuard(unprivilegedLidGuard) {
+                nextClosedLid = true
             }
         } else if !config.allowClosedLid, activeClosedLid {
             backpackGuard.disable()
             unprivilegedLidGuard?.disable()
-            activeClosedLid = false
+            nextClosedLid = false
         }
 
         recordCompletedSession(stopReasonCode: "manualPromotion")
-        isFollowingAgents = false
-        followingAgents = []
-        activeAutoFollowSourceKind = .none
-        pendingAutoFollowSwitchConfirmation = false
-        autoFollowGraceEndDate = nil
-        autoFollowGraceRemainingSeconds = 0
-        isIndefinite = (timeoutSec == nil)
-        initialMinutes = targetMinutes
-        let now = nowProvider()
-        activeSessionStartDate = now
-        activeSessionTrigger = .manual
-        activeSessionAgents = []
-        endDate = timeoutSec.map { now.addingTimeInterval(TimeInterval($0)) }
-        syncAutoFollowSourceKind()
-        refreshDisplayTick()
-        notifyStateTransition()
-
-        // launchCaffeinate locks the screen after a lockOnStart manual start. Promotion produces
-        // the same manual session, so the non-privileged path must honor the same promise — the
-        // privileged branch already does via startPrivilegedLidGuard.
-        if config.effectiveLockOnStart {
-            onRequestClosePopover?()
-            screenLocker.lockScreen()
-        }
+        clearAutoFollowPresentationState()
+        commitManualSession(
+            mode: activeMode,
+            minutes: targetMinutes,
+            timeoutSeconds: timeoutSec,
+            closedLid: nextClosedLid,
+            trigger: .manual,
+            startSafetyWatches: false,
+            lockImmediately: config.effectiveLockOnStart
+        )
     }
 
     /// Requests switching a running manual session back to auto-follow. When closed-lid protection
@@ -1296,11 +1366,11 @@ public final class SessionManager: ObservableObject {
     }
 
     /// Returns a running manual session back to auto-follow when at least one automatic source is active.
-    public func switchManualToAutoFollow() {
+    public func switchManualToAutoFollow(stopReasonCode: String = "manual") {
         guard isRunning, !isFollowingAgents, !isAuthorizing, canSwitchToAutoFollow else { return }
         errorMessage = nil
         pendingAutoFollowSwitchConfirmation = false
-        let ceilingSeconds = max(1, Int(agentTracker.currentPolicy.maxAutoSessionDuration.rounded()))
+        let ceilingSeconds = effectiveAutoFollowCeilingSeconds
         let completedManualClosedLid = activeClosedLid
         // The standard no-auth guard takes over lid protection; when it is not available the
         // guard is dropped together with the manual session.
@@ -1311,18 +1381,13 @@ public final class SessionManager: ObservableObject {
         // abort the switch so the manual session keeps its own protection instead of continuing
         // into an unprotected auto-follow.
         if let lidHandoffGuard, !lidHandoffGuard.isEngaged {
-            var engaged = false
-            lidHandoffGuard.enable { result in
-                if case .success = result { engaged = true }
-            }
-            guard engaged else {
-                errorMessage = l10n.unprivilegedLidUnavailable
+            guard enableUnprivilegedLidGuard(lidHandoffGuard, useGenericUnavailableError: true) else {
                 return
             }
         }
 
         do {
-            try caffeinateRunner.start(mode: activeMode, timeoutSeconds: ceilingSeconds + 30) { [weak self] in
+            try caffeinateRunner.start(mode: activeMode, timeoutSeconds: ceilingSeconds.map { $0 + 30 }) { [weak self] in
                 self?.handleCaffeinateExited()
             }
         } catch {
@@ -1339,10 +1404,8 @@ public final class SessionManager: ObservableObject {
 
         // Record while activeClosedLid still reflects the manual session, then publish the
         // auto-follow value.
-        recordCompletedSession(stopReasonCode: "manual")
-        activeClosedLid = lidHandoffGuard?.isEngaged ?? false
+        recordCompletedSession(stopReasonCode: stopReasonCode)
         autoFollowSuppressed = false
-        autoFollowLimitReached = false
         if config.autoFollowAgents {
             agentTracker.restartSessionWindow()
         }
@@ -1350,22 +1413,112 @@ public final class SessionManager: ObservableObject {
         lastAgentActivityState = trackerState
         let merged = mergedFollowingAgents()
         followingAgents = merged
-        activeSessionAgents = merged
         if !hasActiveHookSessions, case .grace(let since) = trackerState {
             autoFollowGraceEndDate = since.addingTimeInterval(agentTracker.currentPolicy.gracePeriod)
         } else {
             autoFollowGraceEndDate = nil
         }
+        commitAutoFollowSession(
+            mode: activeMode,
+            ceilingSeconds: ceilingSeconds,
+            closedLid: lidHandoffGuard?.isEngaged ?? false,
+            startSafetyWatches: false
+        )
+    }
+
+    private func prepareManualStartInput() -> Bool {
+        guard !isAuthorizing else { return false }
+        guard applyPendingCustomDurationIfNeeded() else { return false }
+        errorMessage = nil
+        return true
+    }
+
+    private func enableUnprivilegedLidGuard(_ guardInstance: ClosedLidGuarding, useGenericUnavailableError: Bool = false) -> Bool {
+        var succeeded = false
+        var failureError: Error?
+        guardInstance.enable { result in
+            switch result {
+            case .success:
+                succeeded = true
+            case .failure(let error):
+                failureError = error
+            }
+        }
+        if !succeeded {
+            errorMessage = useGenericUnavailableError
+                ? l10n.unprivilegedLidUnavailable
+                : (failureError?.localizedDescription ?? l10n.unprivilegedLidUnavailable)
+        }
+        return succeeded
+    }
+
+    private func clearAutoFollowPresentationState() {
+        isFollowingAgents = false
+        followingAgents = []
+        activeAutoFollowSourceKind = .none
+        autoFollowGraceEndDate = nil
+        autoFollowGraceRemainingSeconds = 0
+    }
+
+    private func commitAutoFollowSession(
+        mode: GuardMode,
+        ceilingSeconds: Int?,
+        closedLid: Bool,
+        startSafetyWatches: Bool
+    ) {
+        activeMode = mode
+        activeClosedLid = closedLid
+        isIndefinite = (ceilingSeconds == nil)
+        initialMinutes = ceilingSeconds.map { Double($0) / 60.0 } ?? 0
         let now = nowProvider()
         activeSessionStartDate = now
         activeSessionTrigger = .autoFollow
-        isIndefinite = false
-        initialMinutes = Double(ceilingSeconds) / 60.0
-        endDate = now.addingTimeInterval(TimeInterval(ceilingSeconds))
+        activeSessionAgents = followingAgents
+        endDate = ceilingSeconds.map { now.addingTimeInterval(TimeInterval($0)) }
         isFollowingAgents = true
+        autoFollowLimitReached = false
+        isRunning = true
         syncAutoFollowSourceKind()
         refreshDisplayTick()
+        if startSafetyWatches {
+            startPowerWatch()
+            startThermalWatch()
+        }
         notifyStateTransition()
+    }
+
+    private func commitManualSession(
+        mode: GuardMode,
+        minutes: Double,
+        timeoutSeconds: Int?,
+        closedLid: Bool,
+        trigger: SessionTrigger,
+        startSafetyWatches: Bool,
+        lockImmediately: Bool
+    ) {
+        activeMode = mode
+        activeClosedLid = closedLid
+        isIndefinite = (timeoutSeconds == nil)
+        initialMinutes = minutes
+        let now = nowProvider()
+        activeSessionStartDate = now
+        activeSessionTrigger = trigger
+        activeSessionAgents = []
+        endDate = timeoutSeconds.map { now.addingTimeInterval(TimeInterval($0)) }
+        isRunning = true
+        pendingAutoFollowSwitchConfirmation = false
+        syncAutoFollowSourceKind()
+        refreshDisplayTick()
+        if startSafetyWatches {
+            startPowerWatch()
+            startThermalWatch()
+        }
+        notifyStateTransition()
+
+        if lockImmediately {
+            onRequestClosePopover?()
+            screenLocker.lockScreen()
+        }
     }
 
     public func extendSession(byMinutes addMinutes: Double = 30) {
@@ -1497,8 +1650,12 @@ public final class SessionManager: ObservableObject {
 
     private func handleCaffeinateExited() {
         guard isRunning else { return }
-        if isFollowingAgents, let endDate, nowProvider() >= endDate {
-            handleAutoFollowLimitReached()
+        if let endDate, nowProvider() >= endDate {
+            if isFollowingAgents {
+                handleAutoFollowLimitReached()
+            } else {
+                handleManualSessionExpired()
+            }
         } else {
             stopSession(reason: .expired)
         }

@@ -12,6 +12,8 @@ public final class PreferencesStore {
         static let stopOnUnplug = "sleepskip.stopOnUnplug"
         static let thermalCutoff = "sleepskip.thermalCutoff"
         static let autoFollowAgents = "sleepskip.autoFollowAgents"
+        static let autoFollowMaxMinutes = "sleepskip.autoFollowMaxMinutes"
+        static let handoffToAutoFollowOnExpiry = "sleepskip.handoffToAutoFollowOnExpiry"
         static let disabledAgentSources = "sleepskip.disabledAgentSources"
         static let customAgentPaths = "sleepskip.customAgentPaths"
         static let globalShortcutEnabled = "sleepskip.globalShortcutEnabled"
@@ -19,52 +21,12 @@ public final class PreferencesStore {
         static let history = "sleepskip.history"
         static let hasShownOnboarding = "sleepskip.hasShownOnboarding"
         static let hasSeenAutoFollowNotice = "sleepskip.hasSeenAutoFollowNotice"
-        static let didMigrateFromSleepGuard = "sleepskip.didMigrateFromSleepGuard"
-
-        /// Key names used by SleepGuard before the 1.2.0 rename.
-        static func legacyKey(for key: String) -> String {
-            key.replacingOccurrences(of: "sleepskip.", with: "sleepguard.")
-        }
     }
-
-    /// Preference domain used before the rename. Kept so upgrades keep their settings.
-    public static let legacySuiteName = "io.github.laiyongqiang.SleepGuard"
 
     private let defaults: UserDefaults
 
     public init(defaults: UserDefaults = UserDefaults(suiteName: "io.github.laiyongqiang.SleepSkip") ?? .standard) {
         self.defaults = defaults
-    }
-
-    /// Copies settings from the pre-rename preference domain, once.
-    ///
-    /// Renaming the bundle identifier moves the app to a fresh preferences domain, which would
-    /// otherwise reset the user's mode, duration, language and launch-at-login preference on
-    /// upgrade. Existing values always win; the legacy domain is never written to.
-    public static func migrateFromLegacyDomainIfNeeded(
-        defaults: UserDefaults,
-        legacyDefaults: UserDefaults? = UserDefaults(suiteName: legacySuiteName)
-    ) {
-        guard let legacyDefaults, !defaults.bool(forKey: Keys.didMigrateFromSleepGuard) else { return }
-        defer { defaults.set(true, forKey: Keys.didMigrateFromSleepGuard) }
-
-        // An existing install that already has settings should not be overwritten by stale ones.
-        let hasCurrentSettings = defaults.object(forKey: Keys.mode) != nil
-        guard !hasCurrentSettings else { return }
-
-        let keys = [
-            Keys.mode, Keys.durationMinutes, Keys.customMinutes, Keys.lockOnStart,
-            Keys.allowClosedLid, Keys.closedLidStrategy, Keys.batteryThreshold, Keys.stopOnUnplug,
-            Keys.autoFollowAgents, Keys.language,
-        ]
-        for key in keys {
-            if let value = legacyDefaults.object(forKey: Keys.legacyKey(for: key)) {
-                defaults.set(value, forKey: key)
-            }
-        }
-        if let onboarding = legacyDefaults.object(forKey: Keys.legacyKey(for: Keys.hasShownOnboarding)) {
-            defaults.set(onboarding, forKey: Keys.hasShownOnboarding)
-        }
     }
 
     public var hasShownOnboarding: Bool {
@@ -99,8 +61,6 @@ public final class PreferencesStore {
         let lockOnStart: Bool
         if defaults.object(forKey: Keys.lockOnStart) != nil {
             lockOnStart = defaults.bool(forKey: Keys.lockOnStart)
-        } else if defaults.object(forKey: Keys.mode) != nil || defaults.object(forKey: Keys.durationMinutes) != nil {
-            lockOnStart = true
         } else {
             lockOnStart = false
         }
@@ -153,6 +113,20 @@ public final class PreferencesStore {
             autoFollowAgents = true
         }
 
+        let autoFollowMaxMinutes: Double
+        if let stored = defaults.object(forKey: Keys.autoFollowMaxMinutes) as? Double {
+            autoFollowMaxMinutes = stored == 0 ? 0 : (CommandBuilder.sanitizeMinutes(stored) ?? 120)
+        } else {
+            autoFollowMaxMinutes = 120
+        }
+
+        let handoffToAutoFollowOnExpiry: Bool
+        if defaults.object(forKey: Keys.handoffToAutoFollowOnExpiry) != nil {
+            handoffToAutoFollowOnExpiry = defaults.bool(forKey: Keys.handoffToAutoFollowOnExpiry)
+        } else {
+            handoffToAutoFollowOnExpiry = true
+        }
+
         let disabledAgentSources = defaults.stringArray(forKey: Keys.disabledAgentSources) ?? []
         let customAgentPaths = defaults.stringArray(forKey: Keys.customAgentPaths) ?? []
 
@@ -177,6 +151,8 @@ public final class PreferencesStore {
             stopOnUnplug: stopOnUnplug,
             thermalCutoff: thermalCutoff,
             autoFollowAgents: autoFollowAgents,
+            autoFollowMaxMinutes: autoFollowMaxMinutes,
+            handoffToAutoFollowOnExpiry: handoffToAutoFollowOnExpiry,
             disabledAgentSourceIDs: disabledAgentSources,
             customAgentPaths: customAgentPaths,
             globalShortcutEnabled: globalShortcutEnabled,
@@ -195,6 +171,8 @@ public final class PreferencesStore {
         defaults.set(config.stopOnUnplug, forKey: Keys.stopOnUnplug)
         defaults.set(config.thermalCutoff.rawValue, forKey: Keys.thermalCutoff)
         defaults.set(config.autoFollowAgents, forKey: Keys.autoFollowAgents)
+        defaults.set(config.autoFollowMaxMinutes, forKey: Keys.autoFollowMaxMinutes)
+        defaults.set(config.handoffToAutoFollowOnExpiry, forKey: Keys.handoffToAutoFollowOnExpiry)
         defaults.set(config.disabledAgentSourceIDs, forKey: Keys.disabledAgentSources)
         defaults.set(config.customAgentPaths, forKey: Keys.customAgentPaths)
         defaults.set(config.globalShortcutEnabled, forKey: Keys.globalShortcutEnabled)

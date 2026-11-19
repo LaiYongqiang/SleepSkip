@@ -484,6 +484,16 @@ struct SleepSkipPopoverView: View {
                     }
                     .padding(.top, 2)
                 }
+
+                if manager.config.durationMinutes > 0 {
+                    Toggle(t.handoffOnExpiryLabel, isOn: Binding(
+                        get: { manager.config.handoffToAutoFollowOnExpiry },
+                        set: { manager.setHandoffToAutoFollowOnExpiry($0) }
+                    ))
+                    .toggleStyle(CheckboxToggleStyle())
+                    .font(.system(size: 11))
+                    .padding(.top, 2)
+                }
             }
             .disabled(manager.isAuthorizing)
             .opacity(manager.isAuthorizing ? 0.65 : 1.0)
@@ -589,10 +599,13 @@ struct SleepSkipPopoverView: View {
             if hookOn {
                 parts.append(t.idleHookReadySummary)
             }
+            if !parts.isEmpty {
+                parts.append(t.autoFollowCeilingSummary(manager.config.autoFollowMaxMinutes))
+            }
             return parts.isEmpty ? t.launchConfigSummary(manager.config) : parts.joined(separator: " · ")
         }()
 
-        return VStack(spacing: 4) {
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
                     .fill(accent)
@@ -600,6 +613,28 @@ struct SleepSkipPopoverView: View {
                 Text(title)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(suppressed || hasSources ? .primary : .secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                HStack(spacing: 5) {
+                    Text(t.autoFollowBadge)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Toggle("", isOn: Binding(
+                        get: { manager.config.autoFollowAgents },
+                        set: { manager.setAutoFollowEnabled($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(SwitchToggleStyle())
+                    .controlSize(.mini)
+                    .accessibilityLabel(t.autoFollowLabel)
+                }
+                Button(t.homeAutoFollowManageButton) {
+                    manager.refreshClaudeHookStatus()
+                    manager.showAgentSourcesConfig = true
+                    manager.showSettings = true
+                }
+                .buttonStyle(LinkButtonStyle())
+                .font(.system(size: 11))
             }
             Text(summary)
                 .font(.system(size: 11))
@@ -608,25 +643,28 @@ struct SleepSkipPopoverView: View {
                 .truncationMode(.middle)
 
             if suppressed {
-                Text(t.autoFollowPausedDetail(
-                    sourceKind: manager.activeAutoFollowSourceKind,
-                    limitReached: manager.autoFollowLimitReached
-                ))
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 10)
+                HStack(spacing: 8) {
+                    Text(t.autoFollowPausedDetail(
+                        sourceKind: manager.activeAutoFollowSourceKind,
+                        limitReached: manager.autoFollowLimitReached
+                    ))
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                Button(t.resumeAutoFollowButton) {
-                    manager.resumeAutoFollow()
+                    Spacer(minLength: 4)
+
+                    Button(t.resumeAutoFollowButton) {
+                        manager.resumeAutoFollow()
+                    }
+                    .buttonStyle(BorderedButtonStyle())
+                    .controlSize(.small)
                 }
-                .buttonStyle(BorderedButtonStyle())
-                .controlSize(.small)
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, suppressed ? 10 : 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, suppressed ? 10 : 9)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .fill(suppressed ? Color.orange.opacity(0.08) : Color(NSColor.controlBackgroundColor).opacity(0.5))
@@ -639,15 +677,33 @@ struct SleepSkipPopoverView: View {
 
     private var autoFollowStatusCard: some View {
         let isGracePhase = manager.autoFollowGraceEndDate != nil
-        let statusAccent: Color = isGracePhase ? .orange : .green
-        let statusTitle = isGracePhase ? t.autoFollowGraceTitle : t.autoFollowActiveTitle
+        let isSubprocessGrace = manager.isSubprocessExtendedGrace
+        let statusAccent: Color = isSubprocessGrace ? .green : (isGracePhase ? .orange : .green)
+        let statusTitle: String = {
+            if isSubprocessGrace { return t.autoFollowSubprocessTitle }
+            return isGracePhase ? t.autoFollowGraceTitle : t.autoFollowActiveTitle
+        }()
         let displaySeconds = isGracePhase ? manager.autoFollowGraceRemainingSeconds : manager.remainingSeconds
+        let countdownText = (manager.isIndefinite && !isGracePhase)
+            ? "∞"
+            : DurationFormatter.formatCountdown(displaySeconds)
         let modeSummary = t.modeTitle(manager.activeMode)
         let lidPart = manager.activeClosedLid ? " · \(t.backpackBadge)" : ""
         let agentsText = t.autoFollowAgentsLabel(manager.followingAgents)
         let sourceLine = agentsText.isEmpty
             ? "\(t.autoFollowBadge) · \(modeSummary)\(lidPart)"
             : "\(t.autoFollowBadge) · \(agentsText) · \(modeSummary)\(lidPart)"
+        let detailText: String = {
+            if let endDate = manager.endDate {
+                let timeText = DurationFormatter.formatClockTime(endDate)
+                return isGracePhase
+                    ? t.autoFollowGraceDetail(timeText)
+                    : t.autoFollowCeilingLabel(timeText, sourceKind: manager.activeAutoFollowSourceKind)
+            }
+            return isGracePhase
+                ? t.autoFollowGraceNoCapDetail
+                : t.autoFollowNoCapDetail(manager.activeAutoFollowSourceKind)
+        }()
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -659,30 +715,34 @@ struct SleepSkipPopoverView: View {
                     .foregroundColor(statusAccent)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                Text(DurationFormatter.formatCountdown(displaySeconds))
+                Text(countdownText)
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundColor(.primary)
             }
 
-            Text(sourceLine)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.blue)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            HStack(spacing: 6) {
+                Text(sourceLine)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.blue)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                Button(t.homeAutoFollowManageButton) {
+                    manager.refreshClaudeHookStatus()
+                    manager.showAgentSourcesConfig = true
+                    manager.showSettings = true
+                }
+                .buttonStyle(LinkButtonStyle())
+                .font(.system(size: 11))
+            }
 
             HStack(spacing: 8) {
-                if let endDate = manager.endDate {
-                    let timeText = DurationFormatter.formatClockTime(endDate)
-                    let detailText = isGracePhase
-                        ? t.autoFollowGraceDetail(timeText)
-                        : t.autoFollowCeilingLabel(timeText, sourceKind: manager.activeAutoFollowSourceKind)
-                    Text(detailText)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                Text(detailText)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Spacer(minLength: 4)
                 Button(t.autoFollowStopButton) {
                     manager.stopSession(reason: .manual)
@@ -741,6 +801,15 @@ struct SleepSkipPopoverView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
+
+                    Text(t.manualHandoffStatusLine(
+                        handoffEnabled: manager.config.handoffToAutoFollowOnExpiry,
+                        activeAgents: manager.activeAutoFollowCandidateAgents
+                    ))
+                    .font(.system(size: 11))
+                    .foregroundColor(manager.config.handoffToAutoFollowOnExpiry ? .blue : .secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -794,6 +863,15 @@ struct SleepSkipPopoverView: View {
                         .buttonStyle(BorderedButtonStyle())
                         .controlSize(.small)
                     }
+                }
+
+                if !manager.isIndefinite {
+                    Toggle(t.handoffOnExpiryLabel, isOn: Binding(
+                        get: { manager.config.handoffToAutoFollowOnExpiry },
+                        set: { manager.setHandoffToAutoFollowOnExpiry($0) }
+                    ))
+                    .toggleStyle(CheckboxToggleStyle())
+                    .font(.system(size: 11))
                 }
 
                 if manager.canSwitchToAutoFollow {
@@ -1296,6 +1374,31 @@ struct SleepSkipPopoverView: View {
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(t.autoFollowLimitSectionLabel)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(DurationFormatter.formatDuration(manager.config.autoFollowMaxMinutes, isChinese: t.isZh))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+
+                HStack(spacing: 5) {
+                    ForEach(SessionConfig.autoFollowLimitPresets, id: \.self) { min in
+                        durationChip(
+                            title: DurationFormatter.formatShortPreset(min, isChinese: t.isZh),
+                            accessibleTitle: DurationFormatter.formatDuration(min, isChinese: t.isZh),
+                            selected: manager.config.autoFollowMaxMinutes == min
+                        ) {
+                            manager.setAutoFollowMaxMinutes(min)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 2)
 
             if manager.config.autoFollowAgents {
                 if manager.agentSources.isEmpty {

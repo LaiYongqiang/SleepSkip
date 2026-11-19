@@ -186,19 +186,52 @@ public struct AgentActivityPolicy: Equatable, Sendable {
 /// Pure state machine deciding whether detected agent activity should hold a wake assertion.
 /// Deliberately free of timers, file I/O and AppKit so it can be exercised in tests.
 public final class AgentActivityTracker: @unchecked Sendable {
-    private let policy: AgentActivityPolicy
+    private var policy: AgentActivityPolicy
     private let nowProvider: () -> Date
+    private var subprocessActivityChecker: (Set<String>) -> Set<String>
     private let lock = NSLock()
 
     private var lastActivityBySource: [String: Date] = [:]
+    private var subprocessExtendedSources: Set<String> = []
     private var sessionStart: Date?
 
-    public init(policy: AgentActivityPolicy = .default, nowProvider: @escaping () -> Date = { Date() }) {
+    public init(
+        policy: AgentActivityPolicy = .default,
+        nowProvider: @escaping () -> Date = { Date() },
+        subprocessActivityChecker: @escaping (Set<String>) -> Set<String> = { _ in [] }
+    ) {
         self.policy = policy
         self.nowProvider = nowProvider
+        self.subprocessActivityChecker = subprocessActivityChecker
     }
 
-    public var currentPolicy: AgentActivityPolicy { policy }
+    public func setSubprocessActivityChecker(_ checker: @escaping (Set<String>) -> Set<String>) {
+        lock.lock()
+        subprocessActivityChecker = checker
+        lock.unlock()
+    }
+
+    public var currentSubprocessExtendedSources: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return subprocessExtendedSources.sorted()
+    }
+
+    public var currentPolicy: AgentActivityPolicy {
+        lock.lock()
+        defer { lock.unlock() }
+        return policy
+    }
+
+    public func setMaxAutoSessionDuration(_ duration: TimeInterval) {
+        lock.lock()
+        policy = AgentActivityPolicy(
+            activityWindow: policy.activityWindow,
+            gracePeriod: policy.gracePeriod,
+            maxAutoSessionDuration: duration
+        )
+        lock.unlock()
+    }
 
     public func recordActivity(sourceID: String) {
         let now = nowProvider()
@@ -207,9 +240,11 @@ public final class AgentActivityTracker: @unchecked Sendable {
         if let last = lastActivityBySource.values.max(),
            now.timeIntervalSince(last) >= policy.activityWindow + policy.gracePeriod {
             lastActivityBySource.removeAll()
+            subprocessExtendedSources.removeAll()
             sessionStart = nil
         }
         lastActivityBySource[sourceID] = now
+        subprocessExtendedSources.remove(sourceID)
         if sessionStart == nil {
             sessionStart = now
         }
@@ -223,14 +258,12 @@ public final class AgentActivityTracker: @unchecked Sendable {
     public func evaluate(at now: Date) -> AgentActivityState {
         lock.lock()
         let lastActivity = lastActivityBySource
-        if let last = lastActivity.values.max(),
-           now.timeIntervalSince(last) >= policy.activityWindow + policy.gracePeriod {
-            sessionStart = nil
-        }
+        let currentPolicy = policy
+        let checker = subprocessActivityChecker
         lock.unlock()
 
         let active = lastActivity
-            .filter { now.timeIntervalSince($0.value) < policy.activityWindow }
+            .filter { now.timeIntervalSince($0.value) < currentPolicy.activityWindow }
             .keys
             .sorted()
 
@@ -240,10 +273,33 @@ public final class AgentActivityTracker: @unchecked Sendable {
         }
 
         guard let mostRecent = lastActivity.values.max() else { return .inactive }
-        let quietSince = mostRecent.addingTimeInterval(policy.activityWindow)
-        if now.timeIntervalSince(quietSince) < policy.gracePeriod {
+        let quietSince = mostRecent.addingTimeInterval(currentPolicy.activityWindow)
+        if now.timeIntervalSince(quietSince) < currentPolicy.gracePeriod {
             return .grace(since: quietSince)
         }
+
+        // Transcript writes have been quiet past the grace window. Before releasing, check if
+        // any tracked agent process still has an active tool/build subprocess running.
+        let candidates = Set(lastActivity.keys)
+        let busySubprocessSources = candidates.isEmpty ? [] : checker(candidates).intersection(candidates)
+        if !busySubprocessSources.isEmpty {
+            let syntheticLastActivity = now.addingTimeInterval(-currentPolicy.activityWindow)
+            lock.lock()
+            for sourceID in busySubprocessSources where lastActivityBySource[sourceID] != nil {
+                lastActivityBySource[sourceID] = syntheticLastActivity
+            }
+            subprocessExtendedSources = busySubprocessSources
+            lock.unlock()
+            return .grace(since: now)
+        }
+
+        lock.lock()
+        if let latest = lastActivityBySource.values.max(),
+           now.timeIntervalSince(latest) >= currentPolicy.activityWindow + currentPolicy.gracePeriod {
+            sessionStart = nil
+            subprocessExtendedSources.removeAll()
+        }
+        lock.unlock()
         return .inactive
     }
 
@@ -254,7 +310,13 @@ public final class AgentActivityTracker: @unchecked Sendable {
         lastActivityBySource = lastActivityBySource.filter {
             AgentSource.displayName(forIdentifier: $0.key).lowercased() != displayName.lowercased()
         }
-        if lastActivityBySource.isEmpty { sessionStart = nil }
+        subprocessExtendedSources = subprocessExtendedSources.filter {
+            AgentSource.displayName(forIdentifier: $0).lowercased() != displayName.lowercased()
+        }
+        if lastActivityBySource.isEmpty {
+            sessionStart = nil
+            subprocessExtendedSources.removeAll()
+        }
         lock.unlock()
     }
 
@@ -271,14 +333,15 @@ public final class AgentActivityTracker: @unchecked Sendable {
     public func autoSessionExceeded(at now: Date? = nil) -> Bool {
         let reference = now ?? nowProvider()
         lock.lock()
+        let maxDuration = policy.maxAutoSessionDuration
         if let last = lastActivityBySource.values.max(),
            reference.timeIntervalSince(last) >= policy.activityWindow + policy.gracePeriod {
             sessionStart = nil
         }
         let start = sessionStart
         lock.unlock()
-        guard let start else { return false }
-        return reference.timeIntervalSince(start) >= policy.maxAutoSessionDuration
+        guard maxDuration.isFinite, maxDuration > 0, let start else { return false }
+        return reference.timeIntervalSince(start) >= maxDuration
     }
 
     /// Ends the current automatic session window but keeps recent activity, so a still-busy
@@ -293,6 +356,7 @@ public final class AgentActivityTracker: @unchecked Sendable {
     public func reset() {
         lock.lock()
         lastActivityBySource.removeAll()
+        subprocessExtendedSources.removeAll()
         sessionStart = nil
         lock.unlock()
     }
@@ -314,9 +378,6 @@ public protocol ClaudeHookControlling: AnyObject {
 /// Manages SleepSkip `UserPromptSubmit` / `Stop` hooks inside `~/.claude/settings.json`
 /// while preserving all unrelated settings and user hooks.
 public final class ClaudeCodeHookManager: ClaudeHookControlling {
-    public static let startCommand = "sleepskip hook start --agent claude-code >/dev/null 2>&1 || true"
-    public static let stopCommand = "sleepskip hook stop --agent claude-code >/dev/null 2>&1 || true"
-
     private let settingsURL: URL
     private let fileManager: FileManager
     private let executableURL: URL?
@@ -430,9 +491,8 @@ public final class ClaudeCodeHookManager: ClaudeHookControlling {
     }
 
     private static func isOwnedCommand(_ command: String) -> Bool {
-        // Only exact legacy commands and our strictly shaped generated commands are ours.
+        // Only strictly shaped generated commands with our ownership marker are ours.
         // A user's echo/example containing the words "sleepskip hook start" remains untouched.
-        if command == startCommand || command == stopCommand { return true }
         for action in ["start", "stop"] {
             let suffix = " hook \(action) --agent claude-code >/dev/null 2>&1 || true" + ownershipMarker
             guard command.hasSuffix(suffix) else { continue }
@@ -520,5 +580,142 @@ private extension Data {
     var trimmingWhitespaceIsEmpty: Bool {
         guard let text = String(data: self, encoding: .utf8) else { return isEmpty }
         return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// Detects whether any tracked Agent source process is currently executing a long-running
+/// tool/build/test subprocess (or consuming active CPU) when its transcript goes quiet.
+public enum AgentSubprocessDetector {
+    public struct ProcessSnapshotRow: Equatable, Sendable {
+        public let pid: Int32
+        public let ppid: Int32
+        public let cpuPercent: Double
+        public let commandName: String
+
+        public init(pid: Int32, ppid: Int32, cpuPercent: Double, commandName: String) {
+            self.pid = pid
+            self.ppid = ppid
+            self.cpuPercent = cpuPercent
+            self.commandName = commandName
+        }
+    }
+
+    private static let toolExecutables: Set<String> = [
+        "bash", "zsh", "sh", "fish",
+        "swift", "swift-frontend", "swiftc", "xcodebuild", "xctest",
+        "cargo", "rustc", "rustdoc",
+        "clang", "clang++", "gcc", "g++", "cc", "c++", "ld",
+        "make", "cmake", "ninja", "bazel", "buck2",
+        "pytest", "python", "python3",
+        "go", "javac", "java", "mvn", "gradle",
+        "docker", "podman", "kubectl",
+        "jest", "vitest", "playwright", "tsc", "webpack", "vite", "esbuild",
+        "curl", "wget", "git", "ssh", "scp", "rsync",
+        "tar", "zip", "unzip", "zstd", "gzip", "ffmpeg",
+        "ruby", "php", "perl"
+    ]
+
+    public static func agentExecutableNames(for sourceID: String) -> Set<String> {
+        switch sourceID.lowercased() {
+        case "claude-code": return ["claude"]
+        case "codex": return ["codex"]
+        case "dsh": return ["dsh", "deepseek"]
+        case "gemini-cli": return ["gemini"]
+        case "opencode": return ["opencode"]
+        default:
+            if sourceID.hasPrefix("custom:") {
+                let last = URL(fileURLWithPath: String(sourceID.dropFirst("custom:".count))).lastPathComponent.lowercased()
+                let cleaned = last.hasPrefix(".") ? String(last.dropFirst()) : last
+                return cleaned.isEmpty ? [] : [cleaned]
+            }
+            return [sourceID.lowercased()]
+        }
+    }
+
+    public static func detectActiveSources(
+        candidateSources: Set<String>,
+        processes: [ProcessSnapshotRow]
+    ) -> Set<String> {
+        guard !candidateSources.isEmpty, !processes.isEmpty else { return [] }
+        var childrenByParent: [Int32: [ProcessSnapshotRow]] = [:]
+        var rowByPID: [Int32: ProcessSnapshotRow] = [:]
+        for row in processes {
+            rowByPID[row.pid] = row
+            childrenByParent[row.ppid, default: []].append(row)
+        }
+
+        var busy: Set<String> = []
+        for sourceID in candidateSources {
+            let names = agentExecutableNames(for: sourceID)
+            guard !names.isEmpty else { continue }
+            let agentRoots = processes.filter { row in
+                names.contains(normalizedExecutableName(row.commandName))
+            }
+            for root in agentRoots {
+                if root.cpuPercent >= 2.0 || hasActiveDescendant(rootPID: root.pid, childrenByParent: childrenByParent) {
+                    busy.insert(sourceID)
+                    break
+                }
+            }
+        }
+        return busy
+    }
+
+    private static func hasActiveDescendant(
+        rootPID: Int32,
+        childrenByParent: [Int32: [ProcessSnapshotRow]]
+    ) -> Bool {
+        var visited: Set<Int32> = [rootPID]
+        var queue: [Int32] = [rootPID]
+        while !queue.isEmpty {
+            let current = queue.removeFirst()
+            for child in childrenByParent[current] ?? [] where visited.insert(child.pid).inserted {
+                let exec = normalizedExecutableName(child.commandName)
+                if child.cpuPercent >= 1.0 || toolExecutables.contains(exec) {
+                    return true
+                }
+                queue.append(child.pid)
+            }
+        }
+        return false
+    }
+
+    private static func normalizedExecutableName(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = URL(fileURLWithPath: trimmed).lastPathComponent.lowercased()
+        return base.isEmpty ? trimmed.lowercased() : base
+    }
+
+    public static func parsePSOutput(_ output: String) -> [ProcessSnapshotRow] {
+        var rows: [ProcessSnapshotRow] = []
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.split(maxSplits: 3, omittingEmptySubsequences: true, whereSeparator: { $0 == " " || $0 == "\t" })
+            guard parts.count == 4,
+                  let pid = Int32(parts[0]),
+                  let ppid = Int32(parts[1]),
+                  let cpu = Double(parts[2]) else { continue }
+            rows.append(ProcessSnapshotRow(pid: pid, ppid: ppid, cpuPercent: cpu, commandName: String(parts[3])))
+        }
+        return rows
+    }
+
+    public static func liveActiveSources(among candidateSources: Set<String>) -> Set<String> {
+        guard !candidateSources.isEmpty else { return [] }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "pid=,ppid=,pcpu=,comm="]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let output = String(data: data, encoding: .utf8) else { return [] }
+            return detectActiveSources(candidateSources: candidateSources, processes: parsePSOutput(output))
+        } catch {
+            return []
+        }
     }
 }

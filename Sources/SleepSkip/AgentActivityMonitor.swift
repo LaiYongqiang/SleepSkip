@@ -12,7 +12,6 @@ final class AgentActivityMonitor {
     }
     private let tracker: AgentActivityTracker
     private let onStateChange: (AgentActivityState) -> Void
-    private let onSessionLimitReached: () -> Void
     private let onSourcesChanged: ([AgentSource]) -> Void
     private let eventQueue = DispatchQueue(label: "io.github.laiyongqiang.SleepSkip.fsevents")
     private let queueKey = DispatchSpecificKey<Bool>()
@@ -20,7 +19,6 @@ final class AgentActivityMonitor {
     private var sources: [AgentSource] = []
     private var availableSources: [AgentSource] = []
     private var lastReported: AgentActivityState = .inactive
-    private var didReportLimit = false
     private var quietTimer: DispatchWorkItem?
     private var generation = UUID()
     private struct TranscriptVersion: Equatable {
@@ -43,11 +41,9 @@ final class AgentActivityMonitor {
 
     init(tracker: AgentActivityTracker,
          onStateChange: @escaping (AgentActivityState) -> Void,
-         onSessionLimitReached: @escaping () -> Void = {},
          onSourcesChanged: @escaping ([AgentSource]) -> Void = { _ in }) {
         self.tracker = tracker
         self.onStateChange = onStateChange
-        self.onSessionLimitReached = onSessionLimitReached
         self.onSourcesChanged = onSourcesChanged
         eventQueue.setSpecific(key: queueKey, value: true)
     }
@@ -128,7 +124,7 @@ final class AgentActivityMonitor {
         stream = nil
         sources = []; availableSources = []
         transcriptVersions.removeAll()
-        lastReported = .inactive; didReportLimit = false
+        lastReported = .inactive
         tracker.reset()
     }
 
@@ -183,8 +179,8 @@ final class AgentActivityMonitor {
         let currentGeneration = generation
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.generation == currentGeneration, self.stream != nil else { return }
-            self.reportCurrentState()
-            if case .grace = self.tracker.evaluate() {
+            let state = self.reportCurrentState()
+            if case .grace = state {
                 self.scheduleEvaluation(after: self.tracker.currentPolicy.gracePeriod + 0.02)
             }
         }
@@ -192,16 +188,12 @@ final class AgentActivityMonitor {
         eventQueue.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private func reportCurrentState(activity: Bool = false) {
-        if tracker.autoSessionExceeded(), !didReportLimit {
-            didReportLimit = true
-            onSessionLimitReached()
-            // Keep the quiet timer: inactivity must eventually clear manager suppression.
-        }
+    @discardableResult
+    private func reportCurrentState(activity: Bool = false) -> AgentActivityState {
         let state = tracker.evaluate()
-        if case .inactive = state { didReportLimit = false }
-        guard activity || state.displayEquivalent != lastReported.displayEquivalent else { return }
+        guard activity || state.displayEquivalent != lastReported.displayEquivalent else { return state }
         lastReported = state
         onStateChange(state)
+        return state
     }
 }
