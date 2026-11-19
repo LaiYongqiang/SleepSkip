@@ -18,7 +18,7 @@ sleepskip -- codex "refactor auth module"
 
 Open SleepSkip from the menu bar to start with one `Enter` keystroke, or leave **Auto-Follow Agents** enabled so it holds sleep automatically whenever your agents are writing. (Manual release downloads can also install the `sleepskip` CLI in one click inside **Preferences**.)
 
-Directory following is a heuristic: a write counts as active for 30 seconds, followed by a 5-minute grace period (extended when an observed agent subprocess is still running). Each automatic run has a configurable safety ceiling (2 hours by default; adjustable to `1h`, `2h`, `4h`, `8h`, or `Unlimited` in Preferences). Manual timers can also hand off automatically to Auto-Follow on expiry when an agent is still active. Use a wrapped command or an explicit manual session for work whose exact duration must be guaranteed without transcript signals.
+Directory following is a heuristic: a write counts as active for 30 seconds, followed by a 5-minute grace period (extended when an observed agent subprocess is still running). Each automatic run has a configurable safety ceiling (2 hours by default; adjustable to `2h`, `4h`, `8h`, `12h`, or `Unlimited` in Preferences). Manual timers can also hand off automatically to Auto-Follow on expiry when an agent is still active. Use a wrapped command or an explicit manual session for work whose exact duration must be guaranteed without transcript signals.
 
 See [beta scope and acceptance](docs/BETA.md) for supported evidence, known limitations, and recovery steps. Closed-lid modes remain experimental until verified on your hardware and macOS version.
 
