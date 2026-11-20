@@ -170,3 +170,4 @@ SleepSkip strictly avoids:
 ## License
 
 [MIT License](LICENSE) © 2026 LaiYongqiang
+<!-- conflict-pr-marker -->
